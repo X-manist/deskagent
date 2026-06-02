@@ -928,6 +928,16 @@ function maybeQuotaPrompt(message) {
   }
 }
 
+function escapeAttr(value) {
+  return String(value || '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+}
+
 const sendCodeBtn = $('#sendCodeBtn');
 const loginPhone = $('#loginPhone');
 const loginCode = $('#loginCode');
@@ -1035,12 +1045,15 @@ async function openAccount() {
 async function buyPackage(p, errEl) {
   errEl.textContent = '';
   try {
-    // Manual provider = immediate confirmation (test/demo). Real Alipay/WeChat
-    // flows will return a pay_url/QR and grant via webhook.
-    const order = await window.api.auth.createOrder(p.id, 'manual');
-    await window.api.auth.confirmOrder(order.out_trade_no);
-    await openAccount();
-    await refreshAccountBadge();
+    const order = await window.api.auth.createOrder(p.id, 'wechat');
+    const pay = order && order.pay_info ? order.pay_info : {};
+    if (pay.pay_url) {
+      errEl.innerHTML = `订单已创建，请完成支付后自动到账。<a href="${escapeAttr(pay.pay_url)}" target="_blank" rel="noreferrer">打开支付</a>`;
+    } else {
+      errEl.textContent = order && order.out_trade_no
+        ? `订单已创建（${order.out_trade_no}），等待支付通道返回支付链接后到账。`
+        : '订单已创建，完成支付后自动到账。';
+    }
   } catch (e) {
     errEl.textContent = e && e.message ? e.message : '购买失败';
   }

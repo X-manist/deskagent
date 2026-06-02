@@ -25,7 +25,7 @@ struct CreateReq {
     provider: String,
 }
 fn default_provider() -> String {
-    "manual".into()
+    "wechat".into()
 }
 
 async fn create_order(
@@ -35,6 +35,13 @@ async fn create_order(
 ) -> AppResult<Json<serde_json::Value>> {
     if !matches!(req.provider.as_str(), "manual" | "alipay" | "wechat") {
         return Err(AppError::bad("不支持的支付方式"));
+    }
+    if req.provider == "manual" && !st.cfg.allow_manual_pay {
+        return Err(AppError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "manual_pay_disabled",
+            "手动支付已关闭",
+        ));
     }
     let pkg: Option<(String, String, i64, f64, i64, i64)> = sqlx::query_as(
         "SELECT name, model, total_tokens, token_multiplier, price_cents, duration_days FROM packages WHERE id = ? AND active = 1",

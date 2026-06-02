@@ -93,7 +93,7 @@ impl Config {
             free_turns: ev("FREE_TURNS", "3").parse().unwrap_or(3),
             reserve_tokens: ev("RESERVE_TOKENS", "4000").parse().unwrap_or(4000),
             max_body_bytes: ev("MAX_BODY_BYTES", "2097152").parse().unwrap_or(2_097_152),
-            allow_manual_pay: ev("ALLOW_MANUAL_PAY", "true") != "false",
+            allow_manual_pay: ev("ALLOW_MANUAL_PAY", "false") == "true",
             sms_provider: ev("SMS_PROVIDER", "aliyun_pnvs"),
             sms_code_ttl_secs: ev("SMS_CODE_TTL_SECS", "300").parse().unwrap_or(300),
             sms_cooldown_secs: ev("SMS_SEND_COOLDOWN_SECS", "60").parse().unwrap_or(60),

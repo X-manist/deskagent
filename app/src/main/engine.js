@@ -116,11 +116,13 @@ class Engine extends EventEmitter {
     this.threadId = null;
     this.currentTurnId = null;
     this.deltaItems = new Map(); // `${threadId}:${itemId}` -> accumulated text
+    this.itemUiIds = new Map(); // `${threadId}:${sourceItemId}` -> current-turn UI item id
     // Per-thread turn bookkeeping for concurrent conversations. The engine's
     // global `this.state` only reflects app-server lifecycle (starting/ready/
     // error); whether a given conversation is mid-turn lives here so multiple
     // threads can run turns in parallel without a shared busy flag.
     this.threadTurns = new Map(); // threadId -> { state:'turn'|'ready', turnId }
+    this.turnScopes = new Map(); // threadId -> local unique scope for current turn
     this.pendingInterrupt = new Set(); // threadIds asked to stop before turnId known
     this.subscribedThreads = new Set(); // threads we still want notifications for
   }
@@ -590,7 +592,41 @@ class Engine extends EventEmitter {
       state,
       turnId: turnId || (state === 'turn' ? prev.turnId : undefined),
     });
+    if (state === 'turn' && prev.state !== 'turn') this._clearThreadItemIds(threadId);
+    if (state !== 'turn') this.turnScopes.delete(threadId);
     this.emit('turnState', { threadId, state });
+  }
+
+  _clearThreadItemIds(threadId) {
+    const prefix = `${threadId}:`;
+    for (const key of this.itemUiIds.keys()) {
+      if (key.startsWith(prefix)) this.itemUiIds.delete(key);
+    }
+    for (const key of this.deltaItems.keys()) {
+      if (key.startsWith(prefix)) this.deltaItems.delete(key);
+    }
+  }
+
+  _turnScope(threadId, turnId) {
+    if (!threadId) return turnId || 'global';
+    let scope = this.turnScopes.get(threadId);
+    if (!scope) {
+      scope = turnId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      this.turnScopes.set(threadId, scope);
+    }
+    return scope;
+  }
+
+  _uiItemId(threadId, itemId) {
+    const raw = itemId || 'message';
+    const mapKey = `${threadId}:${raw}`;
+    const existing = this.itemUiIds.get(mapKey);
+    if (existing) return existing;
+    const turn = this.threadTurns.get(threadId) || {};
+    const scope = this._turnScope(threadId, turn.turnId);
+    const uiItemId = `${scope}:${raw}`;
+    this.itemUiIds.set(mapKey, uiItemId);
+    return uiItemId;
   }
 
   _onNotification(method, params) {
@@ -599,6 +635,7 @@ class Engine extends EventEmitter {
       case 'turn/started': {
         const turnId = params.turn && params.turn.id;
         if (threadId === this.threadId) this.currentTurnId = turnId;
+        if (threadId) this.turnScopes.set(threadId, turnId || this._turnScope(threadId));
         this._markTurn(threadId, 'turn', turnId);
         // Honor a Stop pressed before the turnId was known.
         if (this.pendingInterrupt.has(threadId)) {
@@ -617,11 +654,12 @@ class Engine extends EventEmitter {
         break;
       case 'item/agentMessage/delta': {
         const itemId = params.itemId || params.item_id;
-        const key = `${threadId}:${itemId}`;
+        const uiItemId = this._uiItemId(threadId, itemId);
+        const key = `${threadId}:${uiItemId}`;
         const prev = this.deltaItems.get(key) || '';
         const next = prev + (params.delta || '');
         this.deltaItems.set(key, next);
-        this.emit('delta', { threadId, itemId, delta: params.delta || '', text: next });
+        this.emit('delta', { threadId, itemId: uiItemId, sourceItemId: itemId, delta: params.delta || '', text: next });
         break;
       }
       case 'item/completed':
@@ -680,7 +718,7 @@ class Engine extends EventEmitter {
             .join('\n')
         : '');
     if (t === 'agentMessage' && phase === 'completed') {
-      this.emit('message', { threadId, itemId: item.id, text: itemText || '' });
+      this.emit('message', { threadId, itemId: this._uiItemId(threadId, item.id), sourceItemId: item.id, text: itemText || '' });
     } else if (t === 'commandExecution') {
       this.emit('activity', {
         threadId,

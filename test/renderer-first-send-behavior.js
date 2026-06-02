@@ -54,6 +54,12 @@ class Element {
       welcome.className = 'welcome';
       this.appendChild(welcome);
     }
+    if (this._innerHTML.includes('class="send-btn"')) {
+      const button = new Element();
+      button.tagName = 'BUTTON';
+      button.className = 'send-btn';
+      this.appendChild(button);
+    }
   }
   get innerHTML() {
     return this._innerHTML;
@@ -76,9 +82,21 @@ class Element {
     this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
   }
   querySelector(selector) {
+    const findDeep = (predicate) => {
+      const stack = [...this.children];
+      while (stack.length) {
+        const child = stack.shift();
+        if (predicate(child)) return child;
+        stack.push(...(child.children || []));
+      }
+      return null;
+    };
     if (selector.startsWith('.')) {
       const cls = selector.slice(1);
-      return this.children.find((child) => child.classList && child.classList.contains(cls)) || null;
+      return findDeep((child) => child.classList && child.classList.contains(cls));
+    }
+    if (selector === 'button') {
+      return findDeep((child) => child.tagName === 'BUTTON');
     }
     return null;
   }
@@ -129,6 +147,8 @@ async function runScenario({ trigger, currentThreadOnSend }) {
   let listCalls = 0;
   let newSessionCalls = 0;
   const sendCalls = [];
+  const orderCalls = [];
+  const confirmCalls = [];
 
   const document = {
     body: new Element('body'),
@@ -143,8 +163,10 @@ async function runScenario({ trigger, currentThreadOnSend }) {
     querySelectorAll() {
       return [];
     },
-    createElement() {
-      return new Element();
+    createElement(tagName = '') {
+      const el = new Element();
+      el.tagName = String(tagName || '').toUpperCase();
+      return el;
     },
     addEventListener() {},
   };
@@ -179,13 +201,19 @@ async function runScenario({ trigger, currentThreadOnSend }) {
       getPathForFile: () => '',
       openWorkspace: async () => ({ ok: true }),
       auth: {
-        status: async () => ({ loggedIn: false }),
+        status: async () => ({ loggedIn: true, phone: '13800138000' }),
         me: async () => ({ entitlements: [], free_turns_remaining: 0 }),
         sendSms: async () => ({}),
         verifySms: async () => ({}),
-        packages: async () => ({ packages: [] }),
-        createOrder: async () => ({}),
-        confirmOrder: async () => ({}),
+        packages: async () => ({ packages: [{ id: 7, name: '测试套餐', model: 'glm-5.1', total_tokens: 1000, token_multiplier: 1, duration_days: 30, price_yuan: '9.90' }] }),
+        createOrder: async (packageId, provider) => {
+          orderCalls.push({ packageId, provider });
+          return { out_trade_no: 'ORDER_1', pay_info: { type: provider, pay_url: null } };
+        },
+        confirmOrder: async (outTradeNo) => {
+          confirmCalls.push(outTradeNo);
+          return {};
+        },
         logout: async () => ({}),
       },
       on: (channel, cb) => events.set(channel, cb),
@@ -218,7 +246,7 @@ async function runScenario({ trigger, currentThreadOnSend }) {
   }
   await flush();
 
-  return { sendCalls, listCalls, newSessionCalls };
+  return { elements, sendCalls, listCalls, newSessionCalls, orderCalls, confirmCalls };
 }
 
 (async () => {
@@ -234,6 +262,16 @@ async function runScenario({ trigger, currentThreadOnSend }) {
   assert.strictEqual(enter.sendCalls[0].threadId, 'thread-created');
   assert.strictEqual(enter.newSessionCalls, 1, 'Enter path should create thread when runtime has none');
 
+  const purchase = await runScenario({ trigger: 'click', currentThreadOnSend: 'thread-current' });
+  await purchase.elements.get('member').dispatchEvent(new TestEvent('click'));
+  await flush();
+  const buyButton = purchase.elements.get('packageList').querySelector('button');
+  assert.ok(buyButton, 'account package should render buy button');
+  await buyButton.dispatchEvent(new TestEvent('click'));
+  await flush();
+  assert.deepStrictEqual(purchase.orderCalls, [{ packageId: 7, provider: 'wechat' }]);
+  assert.deepStrictEqual(purchase.confirmCalls, [], 'renderer must not grant quota before real payment confirmation');
+
   console.log(JSON.stringify({
     ok: true,
     checks: [
@@ -241,6 +279,8 @@ async function runScenario({ trigger, currentThreadOnSend }) {
       'enter_send_without_active_conversation',
       'current_thread_reused',
       'new_thread_created_when_missing',
+      'purchase_creates_wechat_order',
+      'purchase_does_not_manual_confirm',
     ],
   }, null, 2));
 })().catch((error) => {
