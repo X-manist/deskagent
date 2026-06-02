@@ -12,6 +12,7 @@
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.5",
     "qrcode": "^1.5.4",
+    "tweetnacl": "^1.0.3",
     "zod": "^4.1.12"
   },
   "scripts": {

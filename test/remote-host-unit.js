@@ -1,118 +1,126 @@
 'use strict';
 const assert = require('assert');
-const { RemoteHost } = require('../app/src/main/remote');
+const { RemoteHost, decryptJson, encryptJson } = require('../app/src/main/remote');
+
+async function post(base, path, body) {
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
 
 async function main() {
-  const calls = [];
-  const commands = [{ id: 'cmd-1', command_type: 'chat_message', payload: { text: '远程测试' } }];
-  const oldFetch = global.fetch;
-  global.fetch = async (url, opts = {}) => {
-    const path = new URL(url).pathname;
-    const method = opts.method || 'GET';
-    const body = opts.body ? JSON.parse(opts.body) : {};
-    const headers = opts.headers || {};
-    calls.push({ path, method, body, headers, auth: headers.Authorization });
-    if (path === '/api/remote/machines' && method === 'POST') {
-      return json({ machine_id: body.machine_id, machine_token: 'da_machine_test' });
-    }
-    if (path.endsWith('/pairing') && method === 'POST') {
-      const publicProto = headers['X-Forwarded-Proto'] || 'http';
-      const publicHost = headers['X-Forwarded-Host'] || '127.0.0.1:8787';
-      return json({
-        code: 'ABC23456',
-        expires_at: '2026-06-02T12:00:00Z',
-        payload: {
-          version: 1,
-          product: 'deskagent',
-          code: 'ABC23456',
-          machine_id: 'm1',
-          server_url: `${publicProto}://${publicHost}`,
-          web_url: 'http://127.0.0.1:8787/remote?code=ABC23456',
-        },
-      });
-    }
-    if (path === '/api/remote/machine/heartbeat') return json({ ok: true });
-    if (path === '/api/remote/machine/commands') return json({ commands: commands.splice(0) });
-    if (path === '/api/remote/machine/commands/cmd-1/result') return json({ ok: true });
-    return json({}, 404);
-  };
-
+  const sent = [];
   const engine = {
     async startNewThread() {
       return { threadId: 'thread-remote' };
     },
     async send(text, attachments, threadId) {
-      assert.strictEqual(text, '远程测试');
-      assert.deepStrictEqual(attachments, []);
-      assert.strictEqual(threadId, 'thread-remote');
+      sent.push({ text, attachments, threadId });
       return { threadId };
     },
   };
 
+  const host = new RemoteHost({
+    baseDir: '/tmp/deskagent-remote-test',
+    workspaceDir: '/tmp/workspace',
+    auth: () => ({ token: 'user-token' }),
+    engine: () => engine,
+    appVersion: '0.1.0',
+  });
+
   try {
-    const host = new RemoteHost({
-      baseDir: '/tmp/deskagent-remote-test',
-      workspaceDir: '/tmp/workspace',
-      backendUrl: 'http://127.0.0.1:8787',
-      publicBackendUrl: 'https://deskagent.example.com',
-      auth: () => ({ token: 'user-token' }),
-      engine: () => engine,
-      appVersion: '0.1.0',
-    });
     await host.start();
-    assert.strictEqual(host.info().pairing.code, 'ABC23456');
-    assert.strictEqual(host.info().pairing.qrText, 'https://deskagent.example.com/remote?code=ABC23456');
-    assert.strictEqual(host.info().pairing.payload.server_url, 'https://deskagent.example.com');
-    assert.strictEqual(host.info().remoteLinkIsLocal, false);
-    assert(host.info().pairing.qrDataUrl.startsWith('data:image/png;base64,'));
-    await host.pollOnce();
-    const resultCall = calls.find((c) => c.path === '/api/remote/machine/commands/cmd-1/result');
-    assert(resultCall, 'expected result callback');
-    assert.strictEqual(resultCall.body.ok, true);
-    assert.strictEqual(resultCall.body.result.thread_id, 'thread-remote');
-    assert(calls.some((c) => c.path === '/api/remote/machines' && c.auth === 'Bearer user-token'));
-    assert(calls.some((c) => c.path === '/api/remote/machine/commands' && c.auth === 'Bearer da_machine_test'));
-    assert(calls.some((c) => c.path.endsWith('/pairing') && c.headers['X-Forwarded-Proto'] === 'https'));
-    assert(calls.some((c) => c.path.endsWith('/pairing') && c.headers['X-Forwarded-Host'] === 'deskagent.example.com'));
+    const info = host.info();
+    assert.strictEqual(info.enabled, true);
+    assert.strictEqual(info.loggedIn, true);
+    assert.strictEqual(info.mode, 'direct-encrypted');
+    assert.strictEqual(info.remoteLinkIsLocal, false);
+    assert.strictEqual(info.hasMachineToken, false);
+    assert(info.pairing.code);
+    assert(info.pairing.qrText.startsWith('http://'));
+    assert(info.pairing.qrText.includes('/remote?'));
+    assert(info.pairing.qrDataUrl.startsWith('data:image/png;base64,'));
+    assert.strictEqual(info.pairing.payload.mode, 'direct-encrypted');
+    assert.strictEqual(info.pairing.payload.crypto, 'xsalsa20-poly1305');
+
+    const qr = new URL(info.pairing.qrText);
+    const hashParams = new URLSearchParams(qr.hash.replace(/^#/, ''));
+    const code = qr.searchParams.get('code');
+    const keyText = hashParams.get('k');
+    const key = Buffer.from(keyText, 'base64url');
+    assert.strictEqual(code, info.pairing.code);
+    assert.strictEqual(qr.searchParams.has('k'), false);
+    assert.strictEqual(key.length, 32);
+    const base = `http://127.0.0.1:${host.port}`;
+
+    const pageRes = await fetch(`${base}/remote?code=${code}#k=${keyText}`);
+    assert.strictEqual(pageRes.status, 200);
+    const pageHtml = await pageRes.text();
+    assert(pageHtml.includes('/vendor/tweetnacl.min.js'));
+    assert(pageHtml.includes('/api/remote/direct/command'));
+
+    const vendorRes = await fetch(`${base}/vendor/tweetnacl.min.js`);
+    assert.strictEqual(vendorRes.status, 200);
+    assert((await vendorRes.text()).includes('nacl'));
+
+    const hello = await post(base, '/api/remote/direct/hello', {
+      code,
+      msg: encryptJson(key, { t: 'hello', at: Date.now() }),
+    });
+    const helloPayload = decryptJson(key, hello.msg);
+    assert.strictEqual(helloPayload.t, 'hello');
+    assert.strictEqual(helloPayload.message, '已直连这台电脑');
+
+    const command = await post(base, '/api/remote/direct/command', {
+      code,
+      msg: encryptJson(key, { t: 'chat_message', text: '远程测试', at: Date.now() }),
+    });
+    const commandPayload = decryptJson(key, command.msg);
+    assert.strictEqual(commandPayload.t, 'accepted');
+    assert.strictEqual(commandPayload.thread_id, 'thread-remote');
+    assert.deepStrictEqual(sent, [{ text: '远程测试', attachments: [], threadId: 'thread-remote' }]);
+
+    await assert.rejects(() => post(base, '/api/remote/direct/hello', {
+      code,
+      msg: encryptJson(Buffer.alloc(32, 1), { t: 'hello' }),
+    }), /加密消息校验失败/);
+
     await host.stop();
 
-    global.fetch = async () => json({ error: { message: 'backend down' } }, 503);
-    const failingHost = new RemoteHost({
-      baseDir: '/tmp/deskagent-remote-fail-test',
+    const loggedOut = new RemoteHost({
+      baseDir: '/tmp/deskagent-remote-logged-out-test',
       workspaceDir: '/tmp/workspace',
-      backendUrl: 'http://127.0.0.1:8787',
-      auth: () => ({ token: 'user-token' }),
+      auth: () => ({ token: '' }),
       engine: () => engine,
       appVersion: '0.1.0',
     });
-    await assert.rejects(() => failingHost.start(), /backend down/);
-    assert.strictEqual(failingHost.info().enabled, false);
-    assert.strictEqual(failingHost.info().hasMachineToken, false);
-    assert.strictEqual(failingHost.info().remoteLinkIsLocal, true);
-    assert(failingHost.info().remoteLinkLocalReason.includes('本机地址'));
+    await loggedOut.start();
+    assert.strictEqual(loggedOut.info().enabled, false);
+    assert.strictEqual(loggedOut.info().loggedIn, false);
 
     console.log(JSON.stringify({
       ok: true,
       checks: [
-        'remote_register_pairing_poll_result',
-        'remote_public_pairing_headers',
-        'remote_failed_start_resets_running_state',
-        'remote_local_link_warning',
+        'remote_direct_pairing_qr',
+        'remote_tweetnacl_vendor_page',
+        'remote_encrypted_hello',
+        'remote_encrypted_command_to_engine',
+        'remote_rejects_wrong_key',
+        'remote_logged_out_no_server',
       ],
     }, null, 2));
   } finally {
-    global.fetch = oldFetch;
+    await host.stop().catch(() => {});
   }
-}
-
-function json(body, status = 200) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    async json() {
-      return body;
-    },
-  };
 }
 
 main().catch((error) => {

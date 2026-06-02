@@ -81,9 +81,9 @@ const { _electron: electron } = require('../app/node_modules/playwright-core');
     await page.waitForTimeout(300);
     await page.evaluate(() => {
       document.querySelector('#member').textContent = '会员：剩余 123,456 Token';
-      document.querySelector('#remoteStateNote').textContent = '异常';
+      document.querySelector('#remoteStateNote').textContent = '本机直连';
       document.querySelector('#remoteCode').textContent = 'ABC23456';
-      document.querySelector('#remoteMeta').textContent = '当前远程服务地址是本机地址，手机或其他设备无法直接打开扫码链接；请配置 DESKAGENT_PUBLIC_BACKEND_URL 为公网地址';
+      document.querySelector('#remoteMeta').textContent = '同一 Wi-Fi/VPN 下扫码连接，10:30 过期';
     });
     await page.screenshot({ path: path.join(outDir, 'electron-compact-window.png') });
 

@@ -65,7 +65,7 @@ npm start
 
 默认 `DESKAGENT_MCP_PROFILE=core`，不自动加载 Playwright、地图、GitHub 等第三方 MCP 示例。开发调试时可改成 `DESKAGENT_MCP_PROFILE=full`，应用会把 `agentconfig/mcp/*.toml` 合并进运行配置。
 
-远程连接二维码不能使用 `127.0.0.1` 给手机扫码。开发时桌面端可以继续通过 `DESKAGENT_BACKEND_URL=http://127.0.0.1:8787` 连接本机服务；如果要让手机或远程浏览器打开扫码链接，需要额外配置 `DESKAGENT_PUBLIC_BACKEND_URL=https://你的公网域名`，打包前确保该值已进入 `app/resources/.env`。
+远程连接不再依赖公网中转服务。桌面端会在本机开启一个随机端口的加密直连页面，二维码里包含局域网/VPN 地址、一次性连接码和一次性密钥；手机或浏览器需要与桌面处于同一 Wi-Fi、VPN，或能直接访问这台电脑的内网 IP。跨 NAT 的公网访问仍应通过 VPN、内网穿透或系统网络能力解决，应用本身不会把远程命令发到公网业务服务器。
 
 ## 打包
 

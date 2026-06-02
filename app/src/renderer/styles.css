@@ -496,8 +496,8 @@ button {
 
 .remote-meta {
   min-height: 0;
-  max-height: 48px;
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
   color: var(--muted);
   font-size: 11.5px;
   line-height: 1.4;
@@ -1626,10 +1626,12 @@ body.dragging #app::after {
   }
 
   .remote-meta {
-    max-height: 22px;
+    display: -webkit-box;
+    max-height: 34px;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
   }
 }
 
@@ -1696,11 +1698,12 @@ body.dragging #app::after {
   }
 
   .remote-meta {
-    display: block;
-    max-height: 17px;
+    display: -webkit-box;
+    max-height: 34px;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
   }
 
   .remote-code {
