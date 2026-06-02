@@ -160,7 +160,6 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
       SMS_MOCK_CODE: '246810',
       SMS_SEND_COOLDOWN_SECS: '0',
       ALLOW_MANUAL_PAY: 'true',
-      FREE_TURNS: '2',
       RESERVE_TOKENS: '4000',
       NO_PROXY: '127.0.0.1,localhost',
       no_proxy: '127.0.0.1,localhost',
@@ -193,6 +192,16 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
     const adminPackages = await jsonFetch(baseUrl, '/admin/api/packages', { token: adminToken });
     assert.ok(adminPackages.packages.length >= 3);
     const basePackage = adminPackages.packages[0];
+
+    const testUser = await jsonFetch(baseUrl, '/admin/api/test-users', {
+      method: 'POST',
+      token: adminToken,
+      body: { phone: '13900139000' },
+    });
+    assert.ok(testUser.token);
+    assert.strictEqual(testUser.user.phone, '13900139000');
+    assert.strictEqual(testUser.user.free_turns_total, 20);
+    assert.strictEqual(testUser.user.free_turns_remaining, 20);
 
     const createdPkg = await jsonFetch(baseUrl, '/admin/api/packages', {
       method: 'POST',
@@ -255,7 +264,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
     assert.ok(publicPackages.packages.every((p) => typeof p.token_multiplier === 'number'));
 
     const meBefore = await jsonFetch(baseUrl, '/api/me', { token: userToken });
-    assert.strictEqual(meBefore.free_turns_remaining, 2);
+    assert.strictEqual(meBefore.free_turns_remaining, 20);
     assert.deepStrictEqual(meBefore.entitlements, []);
 
     const order = await jsonFetch(baseUrl, '/api/orders', {
@@ -364,9 +373,11 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
     assert.strictEqual(multiplierEnt.tokens_used, 2500);
 
     const users = await jsonFetch(baseUrl, '/admin/api/users', { token: adminToken });
-    assert.strictEqual(users.users.length, 1);
-    assert.strictEqual(users.users[0].phone, '13800138000');
-    assert.ok(users.users[0].tokens >= 1234);
+    assert.strictEqual(users.users.length, 2);
+    assert.ok(users.users.some((u) => u.phone === '13900139000' && u.free_turns_remaining === 20));
+    const meteredUser = users.users.find((u) => u.phone === '13800138000');
+    assert.ok(meteredUser);
+    assert.ok(meteredUser.tokens >= 1234);
 
     const orders = await jsonFetch(baseUrl, '/admin/api/orders', { token: adminToken });
     assert.ok(orders.orders.some((o) => o.out_trade_no === order.out_trade_no && o.status === 'granted'));
@@ -377,7 +388,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
     assert.ok(audit.audit.some((a) => a.action === 'grant_order'));
 
     const finalStats = await jsonFetch(baseUrl, '/admin/api/stats', { token: adminToken });
-    assert.strictEqual(finalStats.users_total, 1);
+    assert.strictEqual(finalStats.users_total, 2);
     assert.strictEqual(finalStats.orders_paid, 2);
     assert.ok(finalStats.tokens_total >= 1234);
 
@@ -387,6 +398,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
       checks: [
         'admin_login_and_auth_guard',
         'admin_stats_users_orders_packages_audit',
+        'admin_create_test_user',
         'package_create_update_and_public_visibility',
         'mock_sms_login',
         'manual_payment_idempotent_grant',

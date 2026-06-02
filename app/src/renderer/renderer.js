@@ -205,7 +205,19 @@ function makeMessageEl(role, text) {
 
 function makeActivityEl(kind, text) {
   const el = document.createElement('div');
-  el.className = `activity ${kind === 'file' ? 'file' : kind === 'mcp' ? 'mcp' : ''}`;
+  el.className = `activity ${kind === 'file' ? 'file' : kind === 'reasoning' ? 'reasoning' : ''}`;
+  if (kind === 'reasoning') {
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    const body = document.createElement('div');
+    summary.textContent = '思考过程';
+    body.className = 'activity-body';
+    body.textContent = text || '';
+    details.appendChild(summary);
+    details.appendChild(body);
+    el.appendChild(details);
+    return el;
+  }
   el.textContent = text;
   return el;
 }
@@ -246,8 +258,7 @@ function renderActive() {
 
 function activityDisplay(p) {
   if (p.kind === 'file') return '已修改文件：' + (p.files || []).join(', ');
-  if (p.kind === 'mcp') return (p.phase === 'started' ? '调用工具：' : '工具完成：') + p.text;
-  if (p.kind === 'command') return '$ ' + p.text;
+  if (p.kind === 'reasoning') return p.text || '';
   return p.text || '';
 }
 
@@ -793,11 +804,10 @@ window.api.on('chat:message', (p) => {
 
 window.api.on('chat:activity', (p) => {
   if (p.phase !== 'completed' && p.phase !== 'started') return;
-  // Match the original display filter: command on start; file on completion;
-  // mcp on both; everything else ignored to avoid noise.
-  if (p.kind === 'command' && p.phase !== 'started') return;
+  // Keep the chat transcript user-facing: hide internal command/MCP tool names.
   if (p.kind === 'file' && p.phase !== 'completed') return;
-  if (p.kind !== 'command' && p.kind !== 'file' && p.kind !== 'mcp') return;
+  if (p.kind === 'reasoning' && p.phase !== 'completed') return;
+  if (p.kind !== 'file' && p.kind !== 'reasoning') return;
   const conv = getConv(p.threadId);
   if (!conv) return;
   pushItem(conv, { kind: 'activity', activityKind: p.kind, display: activityDisplay(p) });
@@ -845,9 +855,9 @@ window.api.on('chat:historyLoaded', (p) => {
   conv.items = (p.messages || []).map((m) => {
     if (m.kind === 'message') return { kind: 'message', role: m.role, text: m.text };
     if (m.activityKind === 'file') return { kind: 'activity', activityKind: 'file', display: '已修改文件：' + (m.files || []).join(', ') };
-    if (m.activityKind === 'mcp') return { kind: 'activity', activityKind: 'mcp', display: '调用工具：' + m.text };
-    return { kind: 'activity', activityKind: '', display: m.activityKind === 'command' ? '$ ' + m.text : m.text };
-  });
+    if (m.activityKind === 'reasoning') return { kind: 'activity', activityKind: 'reasoning', display: m.text || '' };
+    return null;
+  }).filter(Boolean);
   conv.loaded = true;
   if (conv.id === activeId) renderActive();
 });

@@ -35,6 +35,19 @@ input, select {
   padding: 8px 10px;
   font-size: 14px;
 }
+textarea {
+  width: 100%;
+  min-height: 74px;
+  resize: vertical;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
 .login-wrap {
   height: 100vh; display: flex; align-items: center; justify-content: center;
 }
@@ -68,6 +81,26 @@ th { color: var(--muted); font-weight: 600; }
 .badge.pending_payment { background: rgba(239,83,80,0.18); color: var(--red); }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .err { color: var(--red); font-size: 13px; }
+.notice {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(56,193,114,0.32);
+  border-radius: 12px;
+  background: rgba(56,193,114,0.08);
+  color: var(--text);
+  font-size: 13px;
+}
+.notice textarea { margin-top: 8px; }
+.panel-block {
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+}
+.inline-field {
+  min-width: 220px;
+}
 .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 h2 { margin: 0; }
 .modal-bg {

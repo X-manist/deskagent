@@ -4,7 +4,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::auth::{issue_admin_token, AuthAdmin};
+use crate::auth::{issue_admin_token, issue_user_token, AuthAdmin};
 use crate::crypto;
 use crate::db;
 use crate::error::{AppError, AppResult};
@@ -15,6 +15,7 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/login", post(login))
         .route("/admin/api/stats", get(stats))
         .route("/admin/api/users", get(list_users))
+        .route("/admin/api/test-users", post(create_test_user))
         .route("/admin/api/orders", get(list_orders))
         .route(
             "/admin/api/packages",
@@ -112,6 +113,8 @@ async fn list_users(
         list.push(json!({
             "id": id, "phone": phone,
             "free_turns_used": free_used,
+            "free_turns_total": st.cfg.free_turns,
+            "free_turns_remaining": (st.cfg.free_turns - free_used).max(0),
             "turns": turns, "tokens": tokens,
             "spent_cents": spent,
             "spent_yuan": format!("{:.2}", spent as f64 / 100.0),
@@ -119,6 +122,61 @@ async fn list_users(
         }));
     }
     Ok(Json(json!({ "users": list })))
+}
+
+#[derive(Deserialize)]
+struct TestUserReq {
+    phone: Option<String>,
+}
+
+fn valid_phone(p: &str) -> bool {
+    p.len() == 11 && p.starts_with('1') && p.chars().all(|c| c.is_ascii_digit())
+}
+
+async fn create_test_user(
+    State(st): State<AppState>,
+    a: AuthAdmin,
+    Json(req): Json<TestUserReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let phone = req
+        .phone
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| {
+            let suffix = chrono::Utc::now().timestamp_millis().rem_euclid(100_000_000);
+            format!("199{suffix:08}")
+        });
+    if !valid_phone(&phone) {
+        return Err(AppError::bad("手机号格式不正确"));
+    }
+    let (id, free_used): (i64, i64) = sqlx::query_as(
+        "INSERT INTO users (phone, last_login_at)
+         VALUES (?, datetime('now'))
+         ON CONFLICT(phone) DO UPDATE SET last_login_at = datetime('now')
+         RETURNING id, free_turns_used",
+    )
+    .bind(&phone)
+    .fetch_one(&st.db)
+    .await?;
+    let token = issue_user_token(&st.cfg.user_jwt_secret, id, &phone);
+    db::audit(
+        &st.db,
+        &a.0.username,
+        "create_test_user",
+        &format!("user #{id} {phone}"),
+    )
+    .await;
+    Ok(Json(json!({
+        "ok": true,
+        "user": {
+            "id": id,
+            "phone": phone,
+            "free_turns_total": st.cfg.free_turns,
+            "free_turns_used": free_used,
+            "free_turns_remaining": (st.cfg.free_turns - free_used).max(0),
+        },
+        "token": token,
+    })))
 }
 
 async fn list_orders(

@@ -98,6 +98,10 @@ class Element {
     if (selector === 'button') {
       return findDeep((child) => child.tagName === 'BUTTON');
     }
+    const tag = selector.toUpperCase();
+    if (tag === 'DETAILS' || tag === 'SUMMARY') {
+      return findDeep((child) => child.tagName === tag);
+    }
     return null;
   }
   querySelectorAll() {
@@ -113,6 +117,11 @@ class Element {
     return Promise.all(results);
   }
   focus() {}
+}
+
+function textOf(el) {
+  if (!el) return '';
+  return [el.textContent || '', ...el.children.map(textOf)].join('');
 }
 
 class TestEvent {
@@ -246,7 +255,7 @@ async function runScenario({ trigger, currentThreadOnSend }) {
   }
   await flush();
 
-  return { elements, sendCalls, listCalls, newSessionCalls, orderCalls, confirmCalls };
+  return { elements, events, sendCalls, listCalls, newSessionCalls, orderCalls, confirmCalls };
 }
 
 (async () => {
@@ -272,6 +281,19 @@ async function runScenario({ trigger, currentThreadOnSend }) {
   assert.deepStrictEqual(purchase.orderCalls, [{ packageId: 7, provider: 'wechat' }]);
   assert.deepStrictEqual(purchase.confirmCalls, [], 'renderer must not grant quota before real payment confirmation');
 
+  const activity = await runScenario({ trigger: 'click', currentThreadOnSend: 'thread-current' });
+  const activityEvent = activity.events.get('chat:activity');
+  activityEvent({ threadId: 'thread-current', kind: 'mcp', phase: 'started', text: 'codex.list_mcp_resource_templates' });
+  activityEvent({ threadId: 'thread-current', kind: 'command', phase: 'started', text: 'internal command' });
+  activityEvent({ threadId: 'thread-current', kind: 'reasoning', phase: 'completed', text: '内部思考摘要' });
+  await flush();
+  const messagesText = textOf(activity.elements.get('messages'));
+  assert.ok(!messagesText.includes('codex.list_mcp_resource_templates'), 'internal tool names must stay hidden');
+  assert.ok(!messagesText.includes('internal command'), 'internal commands must stay hidden');
+  assert.ok(messagesText.includes('思考过程'), 'reasoning should render as a collapsed details label');
+  assert.ok(messagesText.includes('内部思考摘要'), 'reasoning body should remain available after expanding');
+  assert.ok(activity.elements.get('messages').querySelector('details'), 'reasoning should use a details element');
+
   console.log(JSON.stringify({
     ok: true,
     checks: [
@@ -281,6 +303,8 @@ async function runScenario({ trigger, currentThreadOnSend }) {
       'new_thread_created_when_missing',
       'purchase_creates_wechat_order',
       'purchase_does_not_manual_confirm',
+      'internal_tools_hidden_from_transcript',
+      'reasoning_rendered_as_collapsed_details',
     ],
   }, null, 2));
 })().catch((error) => {

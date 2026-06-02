@@ -1050,8 +1050,31 @@ button {
   border-left-color: var(--ok);
 }
 
-.activity.mcp {
+.activity.reasoning {
   border-left-color: var(--gold);
+  max-width: min(720px, 88%);
+  font-family: inherit;
+}
+
+.activity details {
+  display: block;
+}
+
+.activity summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 650;
+  list-style-position: inside;
+}
+
+.activity-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .composer {

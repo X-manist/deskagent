@@ -71,27 +71,62 @@ function Dashboard() {
 function Users() {
   const [list, setList] = useState([]);
   const [err, setErr] = useState('');
-  useEffect(() => {
-    api('/admin/api/users').then((r) => setList(r.users)).catch((e) => setErr(e.message));
-  }, []);
+  const [phone, setPhone] = useState('');
+  const [created, setCreated] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const load = () => api('/admin/api/users').then((r) => setList(r.users)).catch((e) => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  const createTestUser = async () => {
+    setErr('');
+    setCreated(null);
+    setCreating(true);
+    try {
+      const body = phone.trim() ? { phone: phone.trim() } : {};
+      const r = await api('/admin/api/test-users', { method: 'POST', body });
+      setCreated(r);
+      setPhone('');
+      await load();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setCreating(false);
+    }
+  };
   if (err) return <div className="err">{err}</div>;
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th><th>手机号</th><th>免费已用</th><th>对话轮次</th><th>消耗Token</th><th>充值(元)</th><th>注册时间</th><th>最近登录</th>
-        </tr>
-      </thead>
-      <tbody>
-        {list.map((u) => (
-          <tr key={u.id}>
-            <td>{u.id}</td><td>{u.phone}</td><td>{u.free_turns_used}</td>
-            <td>{u.turns}</td><td>{u.tokens}</td><td>{u.spent_yuan}</td>
-            <td>{u.created_at}</td><td>{u.last_login_at || '-'}</td>
+    <div>
+      <div className="panel-block">
+        <div className="row">
+          <div className="field inline-field">
+            <label>测试手机号</label>
+            <input value={phone} placeholder="留空自动生成" onChange={(e) => setPhone(e.target.value)} />
+          </div>
+          <button onClick={createTestUser} disabled={creating}>{creating ? '创建中…' : '+ 添加测试用户'}</button>
+        </div>
+        {created && (
+          <div className="notice">
+            <div>已创建/刷新测试用户：{created.user.phone}，免费额度 {created.user.free_turns_remaining}/{created.user.free_turns_total} 次</div>
+            <textarea readOnly value={created.token} />
+          </div>
+        )}
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th><th>手机号</th><th>免费额度</th><th>对话轮次</th><th>消耗Token</th><th>充值(元)</th><th>注册时间</th><th>最近登录</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {list.map((u) => (
+            <tr key={u.id}>
+              <td>{u.id}</td><td>{u.phone}</td><td>{u.free_turns_remaining}/{u.free_turns_total}</td>
+              <td>{u.turns}</td><td>{u.tokens}</td><td>{u.spent_yuan}</td>
+              <td>{u.created_at}</td><td>{u.last_login_at || '-'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

@@ -559,13 +559,6 @@ class Engine extends EventEmitter {
           out.push({ kind: 'activity', activityKind: 'command', text: item.command || '' });
         } else if (item.type === 'fileChange') {
           out.push({ kind: 'activity', activityKind: 'file', files: (item.changes || []).map((c) => c.path) });
-        } else if (item.type === 'mcpToolCall') {
-          out.push({
-            kind: 'activity',
-            activityKind: 'mcp',
-            text: `${item.server || 'mcp'}.${item.tool || ''}`,
-            status: item.status,
-          });
         } else if (item.type === 'reasoning' && Array.isArray(item.summary) && item.summary.length) {
           out.push({ kind: 'activity', activityKind: 'reasoning', text: item.summary.join('\n') });
         }
@@ -735,27 +728,6 @@ class Engine extends EventEmitter {
         phase,
         status: item.status,
         files: (item.changes || []).map((c) => c.path),
-      });
-    } else if (t === 'mcpToolCall') {
-      const result = item.result && Array.isArray(item.result.content)
-        ? item.result.content
-            .map((part) => {
-              if (!part) return '';
-              if (typeof part.text === 'string') return part.text;
-              if (typeof part.content === 'string') return part.content;
-              if (part.type === 'text' && typeof part.text === 'string') return part.text;
-              return '';
-            })
-            .filter(Boolean)
-            .join('\n')
-        : '';
-      this.emit('activity', {
-        threadId,
-        kind: 'mcp',
-        phase,
-        status: item.status,
-        text: `${item.server || 'mcp'}.${item.tool || ''}`,
-        output: result || (item.error && item.error.message) || '',
       });
     } else if (t === 'reasoning' && phase === 'completed') {
       this.emit('activity', { threadId, kind: 'reasoning', phase, text: (item.summary || []).join('\n') || itemText });

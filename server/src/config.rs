@@ -90,7 +90,7 @@ impl Config {
             upstream_base_url,
             upstream_api_key,
             default_model,
-            free_turns: ev("FREE_TURNS", "3").parse().unwrap_or(3),
+            free_turns: ev("FREE_TURNS", "20").parse().unwrap_or(20),
             reserve_tokens: ev("RESERVE_TOKENS", "4000").parse().unwrap_or(4000),
             max_body_bytes: ev("MAX_BODY_BYTES", "2097152").parse().unwrap_or(2_097_152),
             allow_manual_pay: ev("ALLOW_MANUAL_PAY", "false") == "true",
