@@ -111,7 +111,7 @@ function resolveNativeRuntime() {
 }
 
 function cleanManagedBinaries() {
-  for (const name of ['deskagent-core', 'deskagent-core.exe', 'deskagent-os-tools', 'deskagent-os-tools.exe']) {
+  for (const name of ['deskagent-core', 'deskagent-core.exe', 'deskagent-os-tools', 'deskagent-os-tools.exe', 'deskagent-server', 'deskagent-server.exe']) {
     try { fs.rmSync(path.join(binDir, name), { force: true }); } catch (_) {}
   }
 }
@@ -195,6 +195,44 @@ if (osToolsPath) {
   const message = `[prepare] Rust OS helper not found for ${targetKey()}; packaged desktop automation would be incomplete.`;
   if (process.env.DESKAGENT_ALLOW_MISSING_OS_TOOLS === '1') {
     console.warn(`${message} Continuing because DESKAGENT_ALLOW_MISSING_OS_TOOLS=1.`);
+  } else {
+    throw new Error(message);
+  }
+}
+
+function resolveServerBinary() {
+  const serverExe = targetPlatform === 'win32' ? 'deskagent-server.exe' : 'deskagent-server';
+  if (process.env.DESKAGENT_SERVER_BIN && fs.existsSync(process.env.DESKAGENT_SERVER_BIN)) {
+    return process.env.DESKAGENT_SERVER_BIN;
+  }
+  const triple = TRIPLE_BY_PLATFORM[targetKey()];
+  const manifest = path.resolve(root, '..', 'server', 'Cargo.toml');
+  const releaseBin = targetPlatform === process.platform && targetArch === process.arch
+    ? path.resolve(root, '..', 'server', 'target', 'release', serverExe)
+    : path.resolve(root, '..', 'server', 'target', triple || '', 'release', serverExe);
+  if (!fs.existsSync(releaseBin)) {
+    try {
+      const targetArg = targetPlatform === process.platform && targetArch === process.arch ? '' : ` --target ${triple}`;
+      if (!triple && targetPlatform !== process.platform) throw new Error(`unsupported target ${targetKey()}`);
+      execSync(`cargo build --release --manifest-path "${manifest}"${targetArg}`, { stdio: 'inherit' });
+    } catch (e) {
+      console.warn(`[prepare] WARNING: failed to build deskagent-server: ${e.message}`);
+    }
+  }
+  return fs.existsSync(releaseBin) ? releaseBin : '';
+}
+
+const serverPath = resolveServerBinary();
+if (serverPath) {
+  const serverTarget = path.join(binDir, targetPlatform === 'win32' ? 'deskagent-server.exe' : 'deskagent-server');
+  fs.copyFileSync(serverPath, serverTarget);
+  if (targetPlatform !== 'win32') fs.chmodSync(serverTarget, 0o755);
+  const mb = (fs.statSync(serverTarget).size / 1048576).toFixed(1);
+  console.log(`[prepare] bundled deskagent-server (${serverPath}, ${mb}MB) -> ${path.relative(root, serverTarget)}`);
+} else {
+  const message = `[prepare] deskagent-server not found for ${targetKey()}; packaged login/SMS will require external DESKAGENT_BACKEND_URL.`;
+  if (process.env.DESKAGENT_ALLOW_MISSING_SERVER === '1') {
+    console.warn(`${message} Continuing because DESKAGENT_ALLOW_MISSING_SERVER=1.`);
   } else {
     throw new Error(message);
   }

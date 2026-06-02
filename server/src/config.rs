@@ -35,6 +35,7 @@ pub struct Config {
     pub pnvs_duplicate_policy: String,
     pub pnvs_code_type: String,
     pub pnvs_auto_retry: String,
+    pub pnvs_case_auth_policy: String,
     // Admin bootstrap
     pub admin_bootstrap_user: String,
     pub admin_bootstrap_pass: String,
@@ -75,6 +76,7 @@ impl Config {
             pnvs_duplicate_policy: ev("ALIYUN_PNVS_DUPLICATE_POLICY", "1"),
             pnvs_code_type: ev("ALIYUN_PNVS_CODE_TYPE", "1"),
             pnvs_auto_retry: ev("ALIYUN_PNVS_AUTO_RETRY", "1"),
+            pnvs_case_auth_policy: ev("ALIYUN_PNVS_CASE_AUTH_POLICY", "1"),
             admin_bootstrap_user: ev("ADMIN_BOOTSTRAP_USER", "admin"),
             admin_bootstrap_pass: ev("ADMIN_BOOTSTRAP_PASS", "admin123"),
         }

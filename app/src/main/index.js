@@ -2,6 +2,7 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
 const { loadEnvFiles, defaultEnvCandidates } = require('./env');
 const { Engine } = require('./engine');
 const { LocalBridge } = require('./bridge');
@@ -49,6 +50,8 @@ let bridge = null;
 let remoteHost = null;
 let auth = { token: '', phone: '' };
 let directRelayFallbackActive = false;
+let backendProc = null;
+let backendStartPromise = null;
 
 function loadAuth() {
   try {
@@ -104,10 +107,66 @@ async function backendAvailable(timeoutMs = 1200) {
   }
 }
 
+function backendBinaryPath() {
+  const exe = process.platform === 'win32' ? 'deskagent-server.exe' : 'deskagent-server';
+  const candidates = [
+    process.env.DESKAGENT_SERVER_BIN,
+    app.isPackaged ? path.join(process.resourcesPath, 'bin', exe) : '',
+    path.join(__dirname, '..', '..', '..', 'server', 'target', 'release', exe),
+    path.join(__dirname, '..', '..', '..', 'server', 'target', 'debug', exe),
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || '';
+}
+
+async function waitForBackendReady(timeoutMs = 8_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await backendAvailable(800)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function ensureLocalBackend() {
+  if (!isLocalBackendUrl(BACKEND_URL)) return false;
+  if (await backendAvailable()) return true;
+  if (backendStartPromise) return backendStartPromise;
+  backendStartPromise = (async () => {
+    const bin = backendBinaryPath();
+    if (!bin) return false;
+    const dataDir = path.join(paths.base, 'server');
+    fs.mkdirSync(dataDir, { recursive: true });
+    const env = {
+      ...process.env,
+      BIND_ADDR: new URL(BACKEND_URL).host,
+      DATABASE_URL: process.env.DATABASE_URL || `sqlite://${path.join(dataDir, 'deskagent.db')}?mode=rwc`,
+    };
+    backendProc = spawn(bin, [], {
+      cwd: dataDir,
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    backendProc.stderr.on('data', (chunk) => {
+      sendToWindow('engine:log', { src: 'server', msg: String(chunk).trim() });
+    });
+    backendProc.on('exit', (code, signal) => {
+      backendProc = null;
+      backendStartPromise = null;
+      sendToWindow('engine:log', { src: 'server', msg: `deskagent-server exited (${code ?? signal ?? 'unknown'})` });
+    });
+    return waitForBackendReady();
+  })();
+  try {
+    return await backendStartPromise;
+  } finally {
+    if (!backendProc) backendStartPromise = null;
+  }
+}
+
 async function prepareEngineSettings() {
   directRelayFallbackActive = false;
   if (!isLoggedIn()) return;
-  if (await backendAvailable()) return;
+  if (await ensureLocalBackend()) return;
 
   // Development/internal-test safety net: when the configured member backend is
   // localhost and not running, but .env has a direct relay key, keep chat usable
@@ -130,13 +189,21 @@ async function prepareEngineSettings() {
 }
 
 async function backendFetch(p, { method = 'GET', body, withAuth = false } = {}) {
+  await ensureLocalBackend();
   const headers = { 'Content-Type': 'application/json' };
   if (withAuth && auth.token) headers['Authorization'] = `Bearer ${auth.token}`;
-  const res = await fetch(`${BACKEND_URL}${p}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(`${BACKEND_URL}${p}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    const err = new Error(`会员服务未连接：${BACKEND_URL}。请确认 deskagent-server 已启动或配置 DESKAGENT_BACKEND_URL。`);
+    err.cause = e;
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg = (data && data.error && data.error.message) || `请求失败 (${res.status})`;
@@ -484,6 +551,7 @@ app.on('before-quit', async () => {
   if (engine) await engine.stop();
   if (remoteHost) await remoteHost.stop();
   if (bridge) await bridge.stop();
+  if (backendProc) backendProc.kill();
 });
 
 app.on('window-all-closed', () => {
@@ -493,5 +561,6 @@ app.on('window-all-closed', () => {
 app.on('window-all-closed', async () => {
   if (engine) await engine.stop();
   if (remoteHost) await remoteHost.stop();
+  if (backendProc) backendProc.kill();
   if (process.platform !== 'darwin') app.quit();
 });

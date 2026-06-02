@@ -1400,17 +1400,17 @@ body.dragging #app::after {
 
 .login-code-row {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
 }
 
 .login-code-row input {
-  flex: 1 1 auto;
-  min-width: 142px;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .login-code-row .ghost-btn {
-  flex: 1 0 112px;
+  flex: 0 0 112px;
   white-space: nowrap;
 }
 
@@ -1671,5 +1671,16 @@ body.dragging #app::after {
 
   .sidebar {
     display: none;
+  }
+}
+
+@media (max-width: 430px) {
+  .login-code-row {
+    flex-wrap: wrap;
+  }
+
+  .login-code-row input,
+  .login-code-row .ghost-btn {
+    flex-basis: 100%;
   }
 }
