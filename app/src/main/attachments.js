@@ -2,8 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
+const EXTRACTED_TEXT_MAX_CHARS = 60 * 1024;
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 
 function headerValue(headers, name) {
@@ -89,10 +91,154 @@ function uniqueDestination(dir, filename) {
   return candidate;
 }
 
+function attachmentInputDir(workspaceDir) {
+  return path.join(workspaceDir, 'input');
+}
+
 function inferAttachmentKind(filename, contentType) {
   const type = String(contentType || '').toLowerCase();
   const ext = path.extname(filename || '').toLowerCase();
   return type.startsWith('image/') || IMAGE_EXTENSIONS.has(ext) ? 'image' : 'file';
+}
+
+function xmlDecode(value) {
+  return String(value || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+function findZipEnd(buf) {
+  const min = Math.max(0, buf.length - 0xffff - 22);
+  for (let i = buf.length - 22; i >= min; i -= 1) {
+    if (buf.readUInt32LE(i) === 0x06054b50) return i;
+  }
+  throw new Error('无法读取 PPTX 文件结构');
+}
+
+function readZipEntry(buf, entry) {
+  const offset = entry.localHeaderOffset;
+  if (buf.readUInt32LE(offset) !== 0x04034b50) throw new Error('PPTX 文件头异常');
+  const localNameLen = buf.readUInt16LE(offset + 26);
+  const localExtraLen = buf.readUInt16LE(offset + 28);
+  const dataStart = offset + 30 + localNameLen + localExtraLen;
+  const raw = buf.subarray(dataStart, dataStart + entry.compressedSize);
+  if (entry.compressionMethod === 0) return raw;
+  if (entry.compressionMethod === 8) return zlib.inflateRawSync(raw);
+  return Buffer.alloc(0);
+}
+
+function listZipEntries(buf) {
+  const eocd = findZipEnd(buf);
+  const totalEntries = buf.readUInt16LE(eocd + 10);
+  let pos = buf.readUInt32LE(eocd + 16);
+  const entries = [];
+  for (let i = 0; i < totalEntries; i += 1) {
+    if (buf.readUInt32LE(pos) !== 0x02014b50) break;
+    const compressionMethod = buf.readUInt16LE(pos + 10);
+    const compressedSize = buf.readUInt32LE(pos + 20);
+    const nameLen = buf.readUInt16LE(pos + 28);
+    const extraLen = buf.readUInt16LE(pos + 30);
+    const commentLen = buf.readUInt16LE(pos + 32);
+    const localHeaderOffset = buf.readUInt32LE(pos + 42);
+    const name = buf.subarray(pos + 46, pos + 46 + nameLen).toString('utf8');
+    entries.push({ name, compressionMethod, compressedSize, localHeaderOffset });
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+function extractTextFromSlideXml(xml) {
+  const out = [];
+  const textRe = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g;
+  let match;
+  while ((match = textRe.exec(xml))) {
+    const text = xmlDecode(match[1]).replace(/\s+/g, ' ').trim();
+    if (text) out.push(text);
+  }
+  return out.join('\n');
+}
+
+function slideNumber(name) {
+  const match = String(name || '').match(/slide(\d+)\.xml$/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function extractPptxText(filePath) {
+  const buf = fs.readFileSync(filePath);
+  const slides = listZipEntries(buf)
+    .filter((entry) => /^ppt\/slides\/slide\d+\.xml$/i.test(entry.name))
+    .sort((a, b) => slideNumber(a.name) - slideNumber(b.name));
+  const parts = [];
+  for (const slide of slides) {
+    const xml = readZipEntry(buf, slide).toString('utf8');
+    const text = extractTextFromSlideXml(xml);
+    if (text) parts.push(`幻灯片 ${slideNumber(slide.name)}\n${text}`);
+  }
+  return parts.join('\n\n').trim();
+}
+
+function enrichAttachment(item) {
+  if (!item || item.kind === 'directory' || !item.path) return item;
+  const ext = path.extname(item.path).toLowerCase();
+  if (ext !== '.pptx') return item;
+  try {
+    const extracted = extractPptxText(item.path);
+    if (!extracted) return item;
+    const textPath = uniqueDestination(path.dirname(item.path), `${path.basename(item.path)}.txt`);
+    fs.writeFileSync(textPath, extracted);
+    return {
+      ...item,
+      extractedText: extracted.slice(0, EXTRACTED_TEXT_MAX_CHARS),
+      extractedTextTruncated: extracted.length > EXTRACTED_TEXT_MAX_CHARS,
+      summaryPath: textPath,
+    };
+  } catch (e) {
+    return {
+      ...item,
+      extractionError: (e && e.message) || 'PPTX 文本提取失败',
+    };
+  }
+}
+
+function copyLocalAttachment(sourcePath, kind, workspaceDir) {
+  if (!workspaceDir) throw new Error('工作区目录未初始化');
+  const source = path.resolve(String(sourcePath || ''));
+  if (!source || !fs.existsSync(source)) throw new Error(`附件不存在：${sourcePath}`);
+  const stat = fs.statSync(source);
+  const dir = attachmentInputDir(workspaceDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const safeName = sanitizeAttachmentFilename(path.basename(source));
+  const destination = uniqueDestination(dir, safeName);
+  if (stat.isDirectory()) {
+    fs.cpSync(source, destination, { recursive: true });
+    return {
+      kind: 'directory',
+      path: destination,
+      name: path.basename(destination),
+      originalPath: source,
+    };
+  }
+  fs.copyFileSync(source, destination);
+  const finalKind = kind === 'image' || kind === 'file'
+    ? inferAttachmentKind(destination, kind === 'image' ? 'image/*' : '')
+    : inferAttachmentKind(destination, '');
+  return enrichAttachment({
+    kind: finalKind,
+    path: destination,
+    name: path.basename(destination),
+    originalPath: source,
+    size: stat.size,
+  });
+}
+
+function importLocalAttachments(items, options = {}) {
+  const workspaceDir = options.workspaceDir;
+  return (items || [])
+    .filter((item) => item && item.path)
+    .map((item) => copyLocalAttachment(item.path, item.kind, workspaceDir));
 }
 
 async function downloadUrlAttachment(rawUrl, options = {}) {
@@ -124,23 +270,26 @@ async function downloadUrlAttachment(rawUrl, options = {}) {
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length > maxBytes) throw new Error(`URL 附件超过大小限制 (${Math.round(maxBytes / 1024 / 1024)} MB)`);
 
-  const dir = path.join(workspaceDir, 'attachments');
+  const dir = attachmentInputDir(workspaceDir);
   fs.mkdirSync(dir, { recursive: true });
   const destination = uniqueDestination(dir, filename);
   fs.writeFileSync(destination, buffer);
 
-  return {
+  return enrichAttachment({
     kind: inferAttachmentKind(destination, contentType),
     path: destination,
     name: path.basename(destination),
     sourceUrl: url.toString(),
     size: buffer.length,
     contentType,
-  };
+  });
 }
 
 module.exports = {
+  attachmentInputDir,
   downloadUrlAttachment,
+  extractPptxText,
   inferAttachmentKind,
+  importLocalAttachments,
   sanitizeAttachmentFilename,
 };

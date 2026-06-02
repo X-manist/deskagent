@@ -12,14 +12,27 @@ use crate::meter;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/v1/responses", post(responses))
+    Router::new()
+        .route("/v1/responses", post(responses))
+        .route("/v1/chat/completions", post(chat_completions))
 }
 
-fn extract_model(body: &serde_json::Value) -> String {
+fn extract_model(body: &serde_json::Value, default_model: &str) -> String {
     body.get("model")
         .and_then(|m| m.as_str())
-        .unwrap_or("gpt-5.4-mini")
+        .unwrap_or(default_model)
         .to_string()
+}
+
+fn upstream_endpoint(base_url: &str, endpoint: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url
+            .trim_end_matches('/')
+            .trim_end_matches("/responses")
+            .trim_end_matches("/chat/completions"),
+        endpoint.trim_start_matches('/')
+    )
 }
 
 /// Pull (prompt, completion, total) from a Responses API usage object.
@@ -30,10 +43,12 @@ fn parse_usage(v: &serde_json::Value) -> Option<(i64, i64, i64)> {
         .or_else(|| v.get("usage"))?;
     let input = usage
         .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
     let output = usage
         .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
         .and_then(|x| x.as_i64())
         .unwrap_or(0);
     let total = usage
@@ -67,18 +82,19 @@ fn scan_sse_usage(buf: &str) -> Option<(i64, i64, i64)> {
     last
 }
 
-async fn responses(
-    State(st): State<AppState>,
+async fn forward_metered(
+    st: AppState,
     user: AuthUser,
     headers: HeaderMap,
     body: axum::body::Bytes,
+    endpoint: &'static str,
 ) -> AppResult<Response> {
     if body.len() > st.cfg.max_body_bytes {
         return Err(AppError::bad("请求体过大"));
     }
     let json_body: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| AppError::bad("请求体不是合法 JSON"))?;
-    let model = extract_model(&json_body);
+    let model = extract_model(&json_body, &st.cfg.default_model);
     let wants_stream = json_body
         .get("stream")
         .and_then(|s| s.as_bool())
@@ -95,10 +111,7 @@ async fn responses(
     .await?;
 
     // Forward to the real relay with the server-side key.
-    let url = format!(
-        "{}/responses",
-        st.cfg.upstream_base_url.trim_end_matches('/')
-    );
+    let url = upstream_endpoint(&st.cfg.upstream_base_url, endpoint);
     let mut req = st
         .http
         .post(&url)
@@ -214,4 +227,22 @@ async fn responses(
         .header(header::CONTENT_TYPE, content_type)
         .body(Body::from(full.to_vec()))
         .unwrap())
+}
+
+async fn responses(
+    State(st): State<AppState>,
+    user: AuthUser,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> AppResult<Response> {
+    forward_metered(st, user, headers, body, "responses").await
+}
+
+async fn chat_completions(
+    State(st): State<AppState>,
+    user: AuthUser,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> AppResult<Response> {
+    forward_metered(st, user, headers, body, "chat/completions").await
 }

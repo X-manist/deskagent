@@ -273,9 +273,12 @@ async function streamTranslate(upstreamResp, writer) {
       const choice = obj.choices && obj.choices[0];
       if (!choice) return;
       const delta = choice.delta || {};
-      if (typeof delta.content === 'string' && delta.content) {
-        fullText += delta.content;
-        writer.outputTextDelta(delta.content);
+      const deltaText = typeof delta.content === 'string' && delta.content
+        ? delta.content
+        : (typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '');
+      if (deltaText) {
+        fullText += deltaText;
+        writer.outputTextDelta(deltaText);
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const tc of delta.tool_calls) {

@@ -9,6 +9,7 @@ pub struct Config {
     // Upstream OpenAI-compatible relay (server-side only key).
     pub upstream_base_url: String,
     pub upstream_api_key: String,
+    pub default_model: String,
     // Free quota for brand-new users.
     pub free_turns: i64,
     // Per-request token reservation when a precise estimate is unavailable.
@@ -45,16 +46,50 @@ fn ev(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+fn preferred_provider() -> String {
+    let explicit = ev("UPSTREAM_PROVIDER", "");
+    if !explicit.trim().is_empty() {
+        return explicit.trim().to_lowercase();
+    }
+    let model_provider = ev("MODEL_PROVIDER", "");
+    if !model_provider.trim().is_empty() {
+        return model_provider.trim().to_lowercase();
+    }
+    if env::var("GLM_API_KEY").is_ok()
+        || env::var("GLM_BASE_URL").is_ok()
+        || env::var("GLM_MODEL").is_ok()
+    {
+        return "glm".to_string();
+    }
+    "openai".to_string()
+}
+
 impl Config {
     pub fn from_env() -> Self {
-        let upstream_base_url = ev("OPENAI_BASE_URL", "https://llmapi.debinxiang.top/v1");
+        let provider = preferred_provider();
+        let upstream_base_url = if provider == "glm" {
+            ev("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+        } else {
+            ev("OPENAI_BASE_URL", "https://llmapi.debinxiang.top/v1")
+        };
+        let upstream_api_key = if provider == "glm" {
+            ev("GLM_API_KEY", "")
+        } else {
+            ev("OPENAI_API_KEY", "")
+        };
+        let default_model = if provider == "glm" {
+            ev("GLM_MODEL", "glm-5.1")
+        } else {
+            ev("ADAPTER_MODEL", &ev("OPENAI_MODEL", "gpt-5.4-mini"))
+        };
         Config {
             database_url: ev("DATABASE_URL", "sqlite://deskagent.db?mode=rwc"),
             bind_addr: ev("BIND_ADDR", "127.0.0.1:8787"),
             user_jwt_secret: ev("USER_JWT_SECRET", "dev-user-secret-change-me"),
             admin_jwt_secret: ev("ADMIN_JWT_SECRET", "dev-admin-secret-change-me"),
             upstream_base_url,
-            upstream_api_key: ev("OPENAI_API_KEY", ""),
+            upstream_api_key,
+            default_model,
             free_turns: ev("FREE_TURNS", "3").parse().unwrap_or(3),
             reserve_tokens: ev("RESERVE_TOKENS", "4000").parse().unwrap_or(4000),
             max_body_bytes: ev("MAX_BODY_BYTES", "2097152").parse().unwrap_or(2_097_152),

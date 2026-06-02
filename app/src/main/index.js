@@ -7,7 +7,8 @@ const { loadEnvFiles, defaultEnvCandidates } = require('./env');
 const { Engine } = require('./engine');
 const { LocalBridge } = require('./bridge');
 const { RemoteHost } = require('./remote');
-const { downloadUrlAttachment } = require('./attachments');
+const { downloadUrlAttachment, importLocalAttachments } = require('./attachments');
+const { createWorkspaceCheckpoint, rollbackWorkspace } = require('./workspace');
 
 loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 
@@ -25,20 +26,47 @@ const DEFAULT_SETTINGS = {
   // Production default points at the team relay (OpenAI-compatible gateway).
   // The relay holds the real upstream provider keys; the desktop app only needs
   // the relay base URL + the member's subscription token.
-  baseUrl: process.env.OPENAI_BASE_URL || process.env.GLM_BASE_URL || 'https://llmapi.debinxiang.top/v1',
-  apiKey: process.env.OPENAI_API_KEY || process.env.GLM_API_KEY || '',
-  model: process.env.ADAPTER_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4-mini',
-  relayMode: process.env.RELAY_MODE || 'openai',
+  baseUrl: defaultModelProviderSettings().baseUrl,
+  apiKey: defaultModelProviderSettings().apiKey,
+  model: defaultModelProviderSettings().model,
+  relayMode: defaultModelProviderSettings().relayMode,
   mcpProfile: process.env.DESKAGENT_MCP_PROFILE || 'core',
   memberToken: '',
+  workspaceDir: '',
 };
 
-function envSettings() {
+function preferredProvider() {
+  const explicit = String(process.env.UPSTREAM_PROVIDER || process.env.MODEL_PROVIDER || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  if (process.env.GLM_API_KEY || process.env.GLM_BASE_URL || process.env.GLM_MODEL) return 'glm';
+  return 'openai';
+}
+
+function defaultModelProviderSettings() {
+  const provider = preferredProvider();
+  if (provider === 'glm') {
+    return {
+      baseUrl: process.env.GLM_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: process.env.GLM_API_KEY || '',
+      model: process.env.GLM_MODEL || 'glm-5.1',
+      relayMode: 'glm',
+    };
+  }
   return {
-    baseUrl: process.env.OPENAI_BASE_URL || process.env.GLM_BASE_URL || undefined,
-    apiKey: process.env.OPENAI_API_KEY || process.env.GLM_API_KEY || undefined,
-    model: process.env.ADAPTER_MODEL || process.env.OPENAI_MODEL || undefined,
-    relayMode: process.env.RELAY_MODE || undefined,
+    baseUrl: process.env.OPENAI_BASE_URL || 'https://llmapi.debinxiang.top/v1',
+    apiKey: process.env.OPENAI_API_KEY || '',
+    model: process.env.ADAPTER_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4-mini',
+    relayMode: process.env.RELAY_MODE || 'openai',
+  };
+}
+
+function envSettings() {
+  const provider = defaultModelProviderSettings();
+  return {
+    baseUrl: provider.baseUrl || undefined,
+    apiKey: provider.apiKey || undefined,
+    model: provider.model || undefined,
+    relayMode: process.env.RELAY_MODE || provider.relayMode || undefined,
     mcpProfile: process.env.DESKAGENT_MCP_PROFILE || undefined,
   };
 }
@@ -75,7 +103,7 @@ function isLoggedIn() {
 function effectiveSettings() {
   const base = getSettings();
   if (isLoggedIn() && !directRelayFallbackActive) {
-    return { ...base, baseUrl: `${BACKEND_URL}/v1`, apiKey: auth.token, relayMode: 'openai' };
+    return { ...base, baseUrl: `${BACKEND_URL}/v1`, apiKey: auth.token, relayMode: base.relayMode || 'openai' };
   }
   return base;
 }
@@ -250,11 +278,17 @@ function setupPaths() {
   if (!fs.existsSync(agentHome) && fs.existsSync(legacyHome)) {
     fs.cpSync(legacyHome, agentHome, { recursive: true });
   }
+  const settingsFile = path.join(base, 'settings.json');
+  let mountedWorkspace = '';
+  try {
+    const stored = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    if (stored && typeof stored.workspaceDir === 'string') mountedWorkspace = stored.workspaceDir.trim();
+  } catch (_) {}
   const p = {
     base,
     agentHome,
-    workspaceDir: path.join(base, 'workspace'),
-    settingsFile: path.join(base, 'settings.json'),
+    workspaceDir: mountedWorkspace ? path.resolve(mountedWorkspace) : path.join(base, 'workspace'),
+    settingsFile,
     authFile: path.join(base, 'auth.json'),
   };
   fs.mkdirSync(p.agentHome, { recursive: true });
@@ -322,6 +356,60 @@ function wireEngineEvents() {
   engine.on('threadChanged', fwd('chat:threadChanged'));
   engine.on('historyLoaded', fwd('chat:historyLoaded'));
   engine.on('log', (src, msg) => sendToWindow('engine:log', { src, msg }));
+}
+
+function bridgeOptions() {
+  return {
+    baseDir: paths.base,
+    workspaceDir: paths.workspaceDir,
+    settings: getSettings,
+    mcpCommand: process.execPath,
+    mcpScriptPath: app.isPackaged
+      ? path.join(process.resourcesPath, 'deskagent-mcp.js')
+      : path.join(__dirname, '..', 'mcp', 'deskagent-mcp.js'),
+    mcpEnv: { ELECTRON_RUN_AS_NODE: '1' },
+  };
+}
+
+async function startBridge() {
+  bridge = new LocalBridge(bridgeOptions());
+  await bridge.start();
+}
+
+function createRemoteHost() {
+  remoteHost = new RemoteHost({
+    baseDir: paths.base,
+    workspaceDir: paths.workspaceDir,
+    backendUrl: BACKEND_URL,
+    publicBackendUrl: PUBLIC_BACKEND_URL,
+    appVersion: app.getVersion ? app.getVersion() : '0.1.0',
+    auth: () => auth,
+    engine: () => engine,
+  });
+  wireRemoteEvents();
+}
+
+async function switchWorkspaceDir(nextDir) {
+  const workspaceDir = path.resolve(nextDir);
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  if (engine) {
+    await engine.stop();
+    engine = null;
+  }
+  await stopRemoteHost();
+  if (bridge) {
+    await bridge.stop();
+    bridge = null;
+  }
+  paths.workspaceDir = workspaceDir;
+  await startBridge();
+  createRemoteHost();
+  sendToWindow('workspace:changed', { workspaceDir });
+  if (isLoggedIn()) {
+    await startRemoteHost();
+    await startEngine();
+  }
+  return workspaceDir;
 }
 
 async function startEngine() {
@@ -461,8 +549,13 @@ ipcMain.handle('app:pickAttachments', async (_e, kind) => {
   }
   const result = await dialog.showOpenDialog(win, { properties, filters });
   if (result.canceled) return { canceled: true, items: [] };
-  const items = result.filePaths.map((p) => ({ kind, path: p, name: path.basename(p) }));
+  const picked = result.filePaths.map((p) => ({ kind, path: p, name: path.basename(p) }));
+  const items = importLocalAttachments(picked, { workspaceDir: paths.workspaceDir });
   return { canceled: false, items };
+});
+
+ipcMain.handle('app:importAttachments', async (_e, items) => {
+  return { canceled: false, items: importLocalAttachments(items || [], { workspaceDir: paths.workspaceDir }) };
 });
 
 ipcMain.handle('app:downloadAttachment', async (_e, url) => {
@@ -498,6 +591,34 @@ ipcMain.handle('app:openWorkspace', async () => {
   return { ok: true };
 });
 
+ipcMain.handle('app:mountWorkspace', async () => {
+  const { dialog } = require('electron');
+  const result = await dialog.showOpenDialog(win, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: '选择工作目录',
+    message: '选择后，agent 会把该目录作为运行与读写工作区',
+  });
+  if (result.canceled || !result.filePaths || !result.filePaths[0]) {
+    return { canceled: true, workspaceDir: paths.workspaceDir };
+  }
+  const workspaceDir = path.resolve(result.filePaths[0]);
+  const next = { ...getSettings(), workspaceDir };
+  settingsCache = next;
+  saveSettings(next);
+  await switchWorkspaceDir(workspaceDir);
+  return { ok: true, workspaceDir };
+});
+
+ipcMain.handle('app:createWorkspaceCheckpoint', async (_e, label) => {
+  return createWorkspaceCheckpoint(paths.workspaceDir, label || 'DeskAgent checkpoint');
+});
+
+ipcMain.handle('app:rollbackWorkspace', async () => {
+  const result = await rollbackWorkspace(paths.workspaceDir);
+  sendToWindow('workspace:changed', { workspaceDir: paths.workspaceDir });
+  return result;
+});
+
 ipcMain.handle('remote:status', async () => (remoteHost ? remoteHost.info() : null));
 
 ipcMain.handle('remote:refreshPairing', async () => {
@@ -510,27 +631,8 @@ ipcMain.handle('remote:refreshPairing', async () => {
 app.whenReady().then(async () => {
   paths = setupPaths();
   installBundledAgentConfig();
-  bridge = new LocalBridge({
-    baseDir: paths.base,
-    workspaceDir: paths.workspaceDir,
-    settings: getSettings,
-    mcpCommand: process.execPath,
-    mcpScriptPath: app.isPackaged
-      ? path.join(process.resourcesPath, 'deskagent-mcp.js')
-      : path.join(__dirname, '..', 'mcp', 'deskagent-mcp.js'),
-    mcpEnv: { ELECTRON_RUN_AS_NODE: '1' },
-  });
-  await bridge.start();
-  remoteHost = new RemoteHost({
-    baseDir: paths.base,
-    workspaceDir: paths.workspaceDir,
-    backendUrl: BACKEND_URL,
-    publicBackendUrl: PUBLIC_BACKEND_URL,
-    appVersion: app.getVersion ? app.getVersion() : '0.1.0',
-    auth: () => auth,
-    engine: () => engine,
-  });
-  wireRemoteEvents();
+  await startBridge();
+  createRemoteHost();
   createWindow();
   win.webContents.once('did-finish-load', () => {
     loadAuth();

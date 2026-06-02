@@ -25,7 +25,7 @@ function freePort() {
 function createFakeResponsesServer() {
   const hits = [];
   const server = http.createServer((req, res) => {
-    if (req.method !== 'POST' || req.url !== '/v1/responses') {
+    if (req.method !== 'POST' || (req.url !== '/v1/responses' && req.url !== '/v1/chat/completions')) {
       res.writeHead(404);
       res.end('not found');
       return;
@@ -35,7 +35,7 @@ function createFakeResponsesServer() {
     req.on('end', () => {
       let body = {};
       try { body = JSON.parse(raw); } catch (_) {}
-      hits.push({ authorization: req.headers.authorization || '', body });
+      hits.push({ authorization: req.headers.authorization || '', path: req.url, body });
 
       if (body.test_mode === 'fail') {
         res.writeHead(500, { 'content-type': 'application/json' });
@@ -44,6 +44,21 @@ function createFakeResponsesServer() {
       }
 
       const total = Number(body.test_total_tokens || 1234);
+      if (req.url === '/v1/chat/completions') {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(`data: ${JSON.stringify({
+          id: `chatcmpl_${crypto.randomUUID()}`,
+          choices: [{ delta: { content: 'hello from fake chat upstream' }, index: 0 }],
+        })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          id: `chatcmpl_${crypto.randomUUID()}`,
+          choices: [{ delta: {}, finish_reason: 'stop', index: 0 }],
+          usage: { prompt_tokens: 100, completion_tokens: total - 100, total_tokens: total },
+        })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
       const payload = {
         type: 'response.completed',
         response: {
@@ -131,6 +146,9 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
       ...process.env,
       DATABASE_URL: `sqlite://${path.join(tmp, 'deskagent.db')}?mode=rwc`,
       BIND_ADDR: `127.0.0.1:${serverPort}`,
+      UPSTREAM_PROVIDER: 'openai',
+      GLM_API_KEY: '',
+      GLM_BASE_URL: '',
       OPENAI_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
       OPENAI_API_KEY: 'test-upstream-key',
       USER_JWT_SECRET: 'test-user-secret',
@@ -271,6 +289,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
     assert.ok(stream.includes('hello from fake upstream'));
     assert.strictEqual(fake.hits.length, 1);
     assert.strictEqual(fake.hits[0].authorization, 'Bearer test-upstream-key');
+    assert.strictEqual(fake.hits[0].path, '/v1/responses');
 
     const meAfterUsage = await jsonFetch(baseUrl, '/api/me', { token: userToken });
     const entitlement = meAfterUsage.entitlements.find((e) => e.model === basePackage.model);
@@ -286,6 +305,21 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
     const meAfterFail = await jsonFetch(baseUrl, '/api/me', { token: userToken });
     const entitlementAfterFail = meAfterFail.entitlements.find((e) => e.model === basePackage.model);
     assert.strictEqual(entitlementAfterFail.tokens_used, 1234);
+
+    const chatStream = await streamFetch(baseUrl, '/v1/chat/completions', {
+      token: userToken,
+      body: {
+        model: basePackage.model,
+        stream: true,
+        messages: [{ role: 'user', content: 'system e2e chat metering smoke' }],
+        test_total_tokens: 4321,
+      },
+    });
+    assert.ok(chatStream.includes('hello from fake chat upstream'));
+    assert.strictEqual(fake.hits.at(-1).path, '/v1/chat/completions');
+    const meAfterChat = await jsonFetch(baseUrl, '/api/me', { token: userToken });
+    const entitlementAfterChat = meAfterChat.entitlements.find((e) => e.model === basePackage.model);
+    assert.strictEqual(entitlementAfterChat.tokens_used, 1234 + 4321);
 
     const users = await jsonFetch(baseUrl, '/admin/api/users', { token: adminToken });
     assert.strictEqual(users.users.length, 1);
@@ -316,6 +350,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
         'manual_payment_idempotent_grant',
         'gateway_streaming_metering',
         'gateway_upstream_failure_refund',
+        'gateway_chat_completions_metering',
       ],
     }, null, 2));
   } finally {

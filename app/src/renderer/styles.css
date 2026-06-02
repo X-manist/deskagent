@@ -385,6 +385,37 @@ button {
   text-align: left;
 }
 
+.snapshot-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.snapshot-actions .mini-btn {
+  min-height: 31px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.snapshot-actions .mini-btn.danger {
+  color: var(--danger);
+}
+
+.workspace-hint {
+  min-height: 18px;
+  padding: 0 4px 1px;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .member {
   min-height: 0;
   padding: 5px 4px 0;

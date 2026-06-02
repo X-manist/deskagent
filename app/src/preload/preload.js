@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   saveSettings: (s) => ipcRenderer.invoke('app:saveSettings', s),
   send: (text, attachments, threadId) => ipcRenderer.invoke('chat:send', { text, attachments, threadId }),
   pickAttachments: (kind) => ipcRenderer.invoke('app:pickAttachments', kind),
+  importAttachments: (items) => ipcRenderer.invoke('app:importAttachments', items),
   downloadAttachment: (url) => ipcRenderer.invoke('app:downloadAttachment', url),
   getPathForFile: (file) => {
     try {
@@ -19,6 +20,9 @@ contextBridge.exposeInMainWorld('api', {
   newSession: () => ipcRenderer.invoke('chat:newSession'),
   resumeSession: (threadId) => ipcRenderer.invoke('chat:resumeSession', threadId),
   openWorkspace: () => ipcRenderer.invoke('app:openWorkspace'),
+  mountWorkspace: () => ipcRenderer.invoke('app:mountWorkspace'),
+  createWorkspaceCheckpoint: (label) => ipcRenderer.invoke('app:createWorkspaceCheckpoint', label),
+  rollbackWorkspace: () => ipcRenderer.invoke('app:rollbackWorkspace'),
   remote: {
     status: () => ipcRenderer.invoke('remote:status'),
     refreshPairing: () => ipcRenderer.invoke('remote:refreshPairing'),
@@ -47,6 +51,7 @@ contextBridge.exposeInMainWorld('api', {
       'chat:historyLoaded',
       'auth:state',
       'remote:state',
+      'workspace:changed',
     ];
     if (allowed.includes(channel)) ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },

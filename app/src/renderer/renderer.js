@@ -25,6 +25,10 @@ const urlInput = $('#urlInput');
 const urlErr = $('#urlErr');
 const cancelUrlBtn = $('#cancelUrl');
 const downloadUrlBtn = $('#downloadUrl');
+const mountWorkspaceBtn = $('#mountWorkspace');
+const checkpointWorkspaceBtn = $('#checkpointWorkspace');
+const rollbackWorkspaceBtn = $('#rollbackWorkspace');
+const workspaceHint = $('#workspaceHint');
 
 let attachments = [];
 const THEME_STORAGE_KEY = 'deskagent.themeMode';
@@ -46,6 +50,23 @@ let preparingSend = false;
 let activeConversationPromise = null;
 let remoteState = null;
 let urlDownloading = false;
+let currentWorkspaceDir = '';
+
+function basename(value) {
+  return String(value || '').split(/[\\/]/).filter(Boolean).pop() || value || '';
+}
+
+function setWorkspaceHint(dir) {
+  currentWorkspaceDir = dir || currentWorkspaceDir || '';
+  if (!workspaceHint) return;
+  workspaceHint.textContent = currentWorkspaceDir ? `工作区：${basename(currentWorkspaceDir)}` : '';
+  workspaceHint.title = currentWorkspaceDir || '';
+}
+
+function setModelTag(settings) {
+  const model = settings && settings.model ? settings.model : '';
+  modelTag.textContent = model ? `模型：${model}` : '';
+}
 
 function autoThemeForNow() {
   const hour = new Date().getHours();
@@ -237,6 +258,17 @@ function showSendFailure(message, conv) {
   scrollToBottom();
 }
 
+function showSystemNotice(message, conv = activeConv()) {
+  const item = { kind: 'activity', activityKind: '', display: message };
+  if (conv) {
+    pushItem(conv, item);
+    return;
+  }
+  clearWelcome();
+  messagesEl.appendChild(makeActivityEl('', item.display));
+  scrollToBottom();
+}
+
 function formatTime(ts) {
   if (!ts) return '';
   const d = new Date(ts * 1000);
@@ -379,9 +411,9 @@ function renderRemoteState(state) {
 }
 
 function attachIcon(kind) {
-  if (kind === 'image') return '🖼';
-  if (kind === 'directory') return '📁';
-  return '📄';
+  if (kind === 'image') return '图';
+  if (kind === 'directory') return '夹';
+  return '文';
 }
 
 function renderAttachments() {
@@ -613,10 +645,61 @@ window.addEventListener('drop', (e) => {
       return { kind, path: p, name: f.name };
     })
     .filter(Boolean);
-  if (items.length) addAttachments(items);
+  if (!items.length) return;
+  window.api.importAttachments(items)
+    .then((res) => {
+      if (res && !res.canceled) addAttachments(res.items);
+    })
+    .catch((error) => showSendFailure((error && error.message) || '附件导入失败', activeConv()));
 });
 
 $('#openWorkspace').addEventListener('click', () => window.api.openWorkspace());
+if (mountWorkspaceBtn) {
+  mountWorkspaceBtn.addEventListener('click', async () => {
+    mountWorkspaceBtn.disabled = true;
+    try {
+      const result = await window.api.mountWorkspace();
+      if (result && !result.canceled) {
+        setWorkspaceHint(result.workspaceDir);
+        await refreshSessions();
+      }
+    } catch (e) {
+      showSendFailure((e && e.message) || '挂载工作目录失败', activeConv());
+    } finally {
+      mountWorkspaceBtn.disabled = false;
+    }
+  });
+}
+
+if (checkpointWorkspaceBtn) {
+  checkpointWorkspaceBtn.addEventListener('click', async () => {
+    checkpointWorkspaceBtn.disabled = true;
+    try {
+      const result = await window.api.createWorkspaceCheckpoint('用户手动保存');
+      showSystemNotice((result && result.message) || '已保存工作区快照');
+    } catch (e) {
+      showSendFailure((e && e.message) || '保存快照失败', activeConv());
+    } finally {
+      checkpointWorkspaceBtn.disabled = false;
+    }
+  });
+}
+
+if (rollbackWorkspaceBtn) {
+  rollbackWorkspaceBtn.addEventListener('click', async () => {
+    const ok = window.confirm('将使用 DeskAgent 快照回退当前工作区文件。这个操作会改动工作区内容，是否继续？');
+    if (!ok) return;
+    rollbackWorkspaceBtn.disabled = true;
+    try {
+      const result = await window.api.rollbackWorkspace();
+      showSystemNotice((result && result.message) || '已回退工作区');
+    } catch (e) {
+      showSendFailure((e && e.message) || '回退失败', activeConv());
+    } finally {
+      rollbackWorkspaceBtn.disabled = false;
+    }
+  });
+}
 
 if (refreshRemoteBtn) {
   refreshRemoteBtn.addEventListener('click', async () => {
@@ -656,6 +739,7 @@ $('#saveSettings').addEventListener('click', async () => {
     apiKey: $('#setApiKey').value.trim(),
     model: $('#setModel').value.trim(),
   });
+  setModelTag({ model: $('#setModel').value.trim() });
   modal.classList.add('hidden');
   sessionsLoaded = false;
   const conv = activeConv();
@@ -770,14 +854,25 @@ window.api.on('chat:historyLoaded', (p) => {
   if (conv.id === activeId) renderActive();
 });
 
+window.api.on('workspace:changed', (p) => {
+  if (p && p.workspaceDir) setWorkspaceHint(p.workspaceDir);
+  sessionsLoaded = false;
+  conversations.clear();
+  activeId = null;
+  showWelcome();
+  updateComposer();
+  refreshSessions();
+});
+
 // Bootstrap
 (async () => {
   const info = await window.api.bootstrap();
+  setWorkspaceHint(info.paths && info.paths.workspaceDir);
   if (info.currentThreadId) {
     getConv(info.currentThreadId);
     activeId = info.currentThreadId;
   }
-  modelTag.textContent = '模型：' + (info.settings.model || '');
+  setModelTag(info.settings);
   $('#setBaseUrl').value = info.settings.baseUrl || '';
   $('#setApiKey').value = info.settings.apiKey || '';
   $('#setModel').value = info.settings.model || '';

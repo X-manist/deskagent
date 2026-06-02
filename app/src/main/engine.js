@@ -780,7 +780,18 @@ class Engine extends EventEmitter {
     }
     let body = text || '';
     if (refs.length) {
-      const lines = refs.map((r) => `- ${r.kind === 'directory' ? '目录' : '文件'}：${r.path}`);
+      const lines = refs.map((r) => {
+        const kindLabel = r.kind === 'directory' ? '目录' : '文件';
+        const details = [`- ${kindLabel}：${r.path}`];
+        if (r.originalPath && r.originalPath !== r.path) details.push(`  原始路径：${r.originalPath}`);
+        if (r.summaryPath) details.push(`  文本摘录：${r.summaryPath}`);
+        if (r.extractionError) details.push(`  附件解析提示：${r.extractionError}`);
+        if (r.extractedText) {
+          details.push(`  附件内容摘录：\n${String(r.extractedText).split('\n').map((line) => `    ${line}`).join('\n')}`);
+          if (r.extractedTextTruncated) details.push('  附件内容摘录已截断，请按需读取文本摘录文件。');
+        }
+        return details.join('\n');
+      });
       const note = `\n\n[用户附带的本地${refs.some((r) => r.kind === 'directory') ? '文件/目录' : '文件'}，请在需要时读取]\n${lines.join('\n')}`;
       body = body ? body + note : note.trim();
     }

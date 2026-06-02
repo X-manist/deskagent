@@ -46,14 +46,28 @@ pub async fn bootstrap(pool: &SqlitePool, cfg: &Config) -> Result<()> {
         let defaults = [
             (
                 "体验月卡",
-                "gpt-5.4-mini",
+                cfg.default_model.as_str(),
                 1_000_000i64,
                 1990i64,
                 30i64,
                 1i64,
             ),
-            ("标准月卡", "gpt-5.4", 3_000_000, 4990, 30, 2),
-            ("年度会员", "gpt-5.4", 40_000_000, 49900, 365, 3),
+            (
+                "标准月卡",
+                cfg.default_model.as_str(),
+                3_000_000,
+                4990,
+                30,
+                2,
+            ),
+            (
+                "年度会员",
+                cfg.default_model.as_str(),
+                40_000_000,
+                49900,
+                365,
+                3,
+            ),
         ];
         for (name, model, tokens, price, days, sort) in defaults {
             sqlx::query(
@@ -69,6 +83,21 @@ pub async fn bootstrap(pool: &SqlitePool, cfg: &Config) -> Result<()> {
             .await?;
         }
         tracing::info!("seeded {} default packages", defaults.len());
+    } else if cfg.default_model == "glm-5.1" {
+        let updated = sqlx::query(
+            "UPDATE packages SET model = ?
+             WHERE model IN ('gpt-5.4-mini', 'gpt-5.4')",
+        )
+        .bind(&cfg.default_model)
+        .execute(pool)
+        .await?;
+        if updated.rows_affected() > 0 {
+            tracing::info!(
+                "migrated {} default package models to {}",
+                updated.rows_affected(),
+                cfg.default_model
+            );
+        }
     }
     Ok(())
 }

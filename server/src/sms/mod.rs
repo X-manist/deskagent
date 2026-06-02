@@ -75,7 +75,10 @@ fn require_aliyun_config(cfg: &Config) -> Result<()> {
 
 fn aliyun_success(body: &serde_json::Value) -> bool {
     let code_ok = body.get("Code").and_then(|c| c.as_str()) == Some("OK");
-    let success = body.get("Success").and_then(|s| s.as_bool()).unwrap_or(code_ok);
+    let success = body
+        .get("Success")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(code_ok);
     code_ok && success
 }
 
@@ -88,10 +91,7 @@ fn aliyun_error(action: &str, body: &serde_json::Value) -> anyhow::Error {
         .get("Message")
         .and_then(|m| m.as_str())
         .unwrap_or("阿里云接口返回异常");
-    let request_id = body
-        .get("RequestId")
-        .and_then(|r| r.as_str())
-        .unwrap_or("");
+    let request_id = body.get("RequestId").and_then(|r| r.as_str()).unwrap_or("");
     if request_id.is_empty() {
         anyhow!("{action} failed: {code}: {message}")
     } else {
@@ -231,7 +231,10 @@ mod tests {
         p.insert("Interval".into(), cfg.sms_cooldown_secs.to_string());
         insert_if_present(&mut p, "AutoRetry", &cfg.pnvs_auto_retry);
 
-        assert_eq!(p.get("Action").map(String::as_str), Some("SendSmsVerifyCode"));
+        assert_eq!(
+            p.get("Action").map(String::as_str),
+            Some("SendSmsVerifyCode")
+        );
         assert!(p.get("TemplateParam").unwrap().contains("##code##"));
         assert_eq!(p.get("CodeLength").map(String::as_str), Some("6"));
         assert_eq!(p.get("ValidTime").map(String::as_str), Some("300"));

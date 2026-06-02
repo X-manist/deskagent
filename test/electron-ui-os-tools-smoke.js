@@ -32,6 +32,8 @@ const { _electron: electron } = require('../app/node_modules/playwright-core');
     const page = await app.firstWindow({ timeout: 30000 });
     await page.waitForSelector('#app', { timeout: 30000 });
     await page.screenshot({ path: path.join(outDir, 'electron-login-clean.png') });
+    const modelTag = await page.locator('#modelTag').textContent();
+    assert.ok(modelTag.includes('glm-5.1'), `model tag should show glm-5.1, got: ${modelTag}`);
 
     assert.strictEqual(await page.locator('.rightbar').count(), 0, 'right sidebar should not exist');
     assert.strictEqual(await page.locator('#loginOverlay').count(), 1, 'login overlay should exist on first launch');
@@ -98,6 +100,7 @@ const { _electron: electron } = require('../app/node_modules/playwright-core');
       ok: true,
       checks: [
         'electron_window_opened',
+        'glm_model_label',
         'login_overlay_present',
         'theme_buttons_clickable',
         'settings_modal_clickable',
