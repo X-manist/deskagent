@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>智界桌面助手</title>
+    <script>
+      (() => {
+        const key = 'deskagent.themeMode';
+        const valid = new Set(['auto', 'light', 'dark', 'eye']);
+        const autoTheme = () => {
+          const hour = new Date().getHours();
+          if (hour >= 22 || hour < 7) return 'dark';
+          if (hour >= 18) return 'eye';
+          return 'light';
+        };
+        let mode = 'auto';
+        try {
+          const stored = window.localStorage && window.localStorage.getItem(key);
+          if (valid.has(stored)) mode = stored;
+        } catch (_) {}
+        document.documentElement.dataset.themeMode = mode;
+        document.documentElement.dataset.theme = mode === 'auto' ? autoTheme() : mode;
+      })();
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="logo">智</div>
+          <div class="brand-copy">
+            <div class="brand-name">智界助手</div>
+            <div class="brand-sub">Codex-rs 驱动的桌面助理</div>
+          </div>
+        </div>
+
+        <button id="newSessionBtn" class="new-chat-btn">
+          <span>＋</span>
+          <span>新建对话</span>
+        </button>
+
+        <div class="sidebar-top">
+          <div class="section-title">常用技能</div>
+          <div id="skills" class="skills"></div>
+        </div>
+
+        <div class="sidebar-sessions">
+          <div class="section-title row">
+            <span>会话</span>
+            <span class="section-mark"></span>
+          </div>
+          <div id="sessions" class="sessions"></div>
+        </div>
+
+        <div class="sidebar-bottom">
+          <button id="openWorkspace" class="ghost-btn">打开工作目录</button>
+          <button id="openSettings" class="ghost-btn">设置</button>
+          <div id="member" class="member">会员：体验版</div>
+          <div class="remote-panel sidebar-remote">
+            <div class="remote-head">
+              <span>远程连接</span>
+              <span id="remoteStateNote">待登录</span>
+            </div>
+            <div class="remote-qr">
+              <img id="remoteQr" alt="远程连接二维码" />
+            </div>
+            <div class="remote-code" id="remoteCode">--------</div>
+            <div class="remote-meta" id="remoteMeta">登录后可生成扫码连接码</div>
+            <div class="remote-actions">
+              <button id="refreshRemote" class="mini-btn">刷新</button>
+              <button id="copyRemote" class="mini-btn">复制</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-title">
+            <div class="status">
+              <span id="statusDot" class="dot"></span>
+              <span id="statusText">正在启动…</span>
+            </div>
+            <div class="model-tag" id="modelTag"></div>
+          </div>
+          <div class="theme-switcher" aria-label="主题切换">
+            <span class="theme-label">主题</span>
+            <button type="button" data-theme-choice="auto">自动</button>
+            <button type="button" data-theme-choice="light">浅色</button>
+            <button type="button" data-theme-choice="dark">深色</button>
+            <button type="button" data-theme-choice="eye">护眼</button>
+          </div>
+        </header>
+
+        <section id="messages" class="messages">
+          <div class="welcome">
+            <h1>你好，我是智界助手</h1>
+            <p>我能帮你写作、翻译、整理资料、运行脚本、收发邮件、处理微信和执行定时任务。直接说出你的需求即可。</p>
+          </div>
+        </section>
+
+        <footer class="composer">
+          <div id="attachments" class="attachments hidden"></div>
+          <div class="composer-box">
+            <textarea id="input" rows="1" placeholder="输入你的需求，回车发送（Shift+回车换行）…"></textarea>
+            <div class="composer-row">
+              <div class="attach-group">
+                <button id="attachBtn" class="icon-btn" title="添加图片、文件或目录">＋</button>
+                <div id="attachMenu" class="attach-menu hidden">
+                  <button data-attach="image">上传图片</button>
+                  <button data-attach="file">上传文件</button>
+                  <button data-attach="directory">上传目录</button>
+                </div>
+              </div>
+              <div class="composer-actions">
+                <button id="sendBtn" class="send-btn">发送</button>
+                <button id="stopBtn" class="stop-btn hidden">停止</button>
+              </div>
+            </div>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <div id="settingsModal" class="modal hidden">
+      <div class="modal-card">
+        <h2>设置</h2>
+        <label>中转站地址 (Base URL)</label>
+        <input id="setBaseUrl" type="text" placeholder="https://..." />
+        <label>密钥 / 会员令牌 (API Key)</label>
+        <input id="setApiKey" type="password" placeholder="sk-..." />
+        <label>模型</label>
+        <input id="setModel" type="text" placeholder="glm-4.6" />
+        <div class="modal-actions">
+          <button id="cancelSettings" class="ghost-btn">取消</button>
+          <button id="saveSettings" class="send-btn">保存并重启</button>
+        </div>
+        <p class="hint">提示：正式版会自动填入中转站地址与你的会员令牌，无需手动配置。</p>
+      </div>
+    </div>
+
+    <div id="loginOverlay" class="login-overlay hidden">
+      <div class="login-card">
+        <div class="login-logo">智</div>
+        <h1>欢迎使用智界助手</h1>
+        <p class="login-sub">使用手机号登录，新用户可免费体验 3 次对话</p>
+        <input id="loginPhone" type="tel" maxlength="11" placeholder="请输入手机号" />
+        <div class="login-code-row">
+          <input id="loginCode" type="text" maxlength="6" placeholder="短信验证码" />
+          <button id="sendCodeBtn" class="ghost-btn">获取验证码</button>
+        </div>
+        <div id="loginErr" class="login-err"></div>
+        <button id="loginBtn" class="send-btn">登录 / 注册</button>
+        <p class="hint">登录即表示同意《用户协议》与《隐私政策》</p>
+      </div>
+    </div>
+
+    <div id="accountModal" class="modal hidden">
+      <div class="modal-card">
+        <h2>我的账户</h2>
+        <div id="accountInfo" class="account-info">加载中…</div>
+        <div class="section-title" style="margin-top:16px">充值套餐</div>
+        <div id="packageList" class="package-list"></div>
+        <div id="accountErr" class="login-err"></div>
+        <div class="modal-actions">
+          <button id="logoutBtn" class="ghost-btn">退出登录</button>
+          <button id="closeAccount" class="send-btn">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="rich-renderer.js"></script>
+    <script src="renderer.js"></script>
+  </body>
+</html>

@@ -1,0 +1,262 @@
+use axum::extract::{Path, State};
+use axum::routing::{get, post, put};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::auth::{issue_admin_token, AuthAdmin};
+use crate::crypto;
+use crate::db;
+use crate::error::{AppError, AppResult};
+use crate::state::AppState;
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/admin/api/login", post(login))
+        .route("/admin/api/stats", get(stats))
+        .route("/admin/api/users", get(list_users))
+        .route("/admin/api/orders", get(list_orders))
+        .route(
+            "/admin/api/packages",
+            get(list_packages).post(create_package),
+        )
+        .route("/admin/api/packages/{id}", put(update_package))
+        .route("/admin/api/audit", get(list_audit))
+}
+
+#[derive(Deserialize)]
+struct LoginReq {
+    username: String,
+    password: String,
+}
+
+async fn login(
+    State(st): State<AppState>,
+    Json(req): Json<LoginReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let row: Option<(i64, String, i64)> =
+        sqlx::query_as("SELECT id, password_hash, token_version FROM admins WHERE username = ?")
+            .bind(&req.username)
+            .fetch_optional(&st.db)
+            .await?;
+    let (id, hash, tv) = row.ok_or_else(|| AppError::unauthorized("账号或密码错误"))?;
+    if !crypto::verify_password(&req.password, &hash) {
+        return Err(AppError::unauthorized("账号或密码错误"));
+    }
+    let token = issue_admin_token(&st.cfg.admin_jwt_secret, id, &req.username, tv);
+    Ok(Json(json!({ "token": token, "username": req.username })))
+}
+
+async fn stats(State(st): State<AppState>, _a: AuthAdmin) -> AppResult<Json<serde_json::Value>> {
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&st.db)
+        .await?;
+    let new_today: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE date(created_at) = date('now')")
+            .fetch_one(&st.db)
+            .await?;
+    let paid_orders: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE status='granted'")
+        .fetch_one(&st.db)
+        .await?;
+    let revenue_cents: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE status='granted'",
+    )
+    .fetch_one(&st.db)
+    .await?;
+    let total_turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_sessions")
+        .fetch_one(&st.db)
+        .await?;
+    let total_tokens: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(total_tokens),0) FROM usage_sessions")
+            .fetch_one(&st.db)
+            .await?;
+    Ok(Json(json!({
+        "users_total": users,
+        "users_new_today": new_today,
+        "orders_paid": paid_orders,
+        "revenue_cents": revenue_cents,
+        "revenue_yuan": format!("{:.2}", revenue_cents as f64 / 100.0),
+        "turns_total": total_turns,
+        "tokens_total": total_tokens,
+    })))
+}
+
+async fn list_users(
+    State(st): State<AppState>,
+    _a: AuthAdmin,
+) -> AppResult<Json<serde_json::Value>> {
+    let rows: Vec<(i64, String, i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, phone, free_turns_used, created_at, last_login_at FROM users ORDER BY id DESC LIMIT 500",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let mut list = Vec::new();
+    for (id, phone, free_used, created, last_login) in rows {
+        let turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_sessions WHERE user_id = ?")
+                .bind(id)
+                .fetch_one(&st.db)
+                .await?;
+        let tokens: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(total_tokens),0) FROM usage_sessions WHERE user_id = ?",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        let spent: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE user_id = ? AND status='granted'",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+        list.push(json!({
+            "id": id, "phone": phone,
+            "free_turns_used": free_used,
+            "turns": turns, "tokens": tokens,
+            "spent_cents": spent,
+            "spent_yuan": format!("{:.2}", spent as f64 / 100.0),
+            "created_at": created, "last_login_at": last_login,
+        }));
+    }
+    Ok(Json(json!({ "users": list })))
+}
+
+async fn list_orders(
+    State(st): State<AppState>,
+    _a: AuthAdmin,
+) -> AppResult<Json<serde_json::Value>> {
+    let rows: Vec<(String, i64, String, i64, String, String, String)> = sqlx::query_as(
+        "SELECT out_trade_no, user_id, pkg_name, amount_cents, provider, status, created_at
+         FROM orders ORDER BY id DESC LIMIT 500",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let list: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(no, uid, name, amount, provider, status, created)| {
+            json!({
+                "out_trade_no": no, "user_id": uid, "pkg_name": name,
+                "amount_cents": amount, "amount_yuan": format!("{:.2}", amount as f64 / 100.0),
+                "provider": provider, "status": status, "created_at": created,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "orders": list })))
+}
+
+async fn list_packages(
+    State(st): State<AppState>,
+    _a: AuthAdmin,
+) -> AppResult<Json<serde_json::Value>> {
+    let rows: Vec<(i64, String, String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT id, name, model, total_tokens, price_cents, duration_days, active, sort_order
+         FROM packages ORDER BY sort_order ASC, id ASC",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let list: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(id, name, model, tokens, price, days, active, sort)| {
+            json!({
+                "id": id, "name": name, "model": model, "total_tokens": tokens,
+                "price_cents": price, "duration_days": days,
+                "active": active == 1, "sort_order": sort,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "packages": list })))
+}
+
+#[derive(Deserialize)]
+struct PackageReq {
+    name: String,
+    model: String,
+    total_tokens: i64,
+    price_cents: i64,
+    duration_days: i64,
+    #[serde(default = "default_true")]
+    active: bool,
+    #[serde(default)]
+    sort_order: i64,
+}
+fn default_true() -> bool {
+    true
+}
+
+async fn create_package(
+    State(st): State<AppState>,
+    a: AuthAdmin,
+    Json(req): Json<PackageReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO packages (name, model, total_tokens, price_cents, duration_days, active, sort_order)
+         VALUES (?,?,?,?,?,?,?) RETURNING id",
+    )
+    .bind(&req.name)
+    .bind(&req.model)
+    .bind(req.total_tokens)
+    .bind(req.price_cents)
+    .bind(req.duration_days)
+    .bind(req.active as i64)
+    .bind(req.sort_order)
+    .fetch_one(&st.db)
+    .await?;
+    db::audit(
+        &st.db,
+        &a.0.username,
+        "create_package",
+        &format!("#{id} {} {} {}t", req.name, req.model, req.total_tokens),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true, "id": id })))
+}
+
+async fn update_package(
+    State(st): State<AppState>,
+    a: AuthAdmin,
+    Path(id): Path<i64>,
+    Json(req): Json<PackageReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let res = sqlx::query(
+        "UPDATE packages SET name=?, model=?, total_tokens=?, price_cents=?, duration_days=?, active=?, sort_order=? WHERE id=?",
+    )
+    .bind(&req.name)
+    .bind(&req.model)
+    .bind(req.total_tokens)
+    .bind(req.price_cents)
+    .bind(req.duration_days)
+    .bind(req.active as i64)
+    .bind(req.sort_order)
+    .bind(id)
+    .execute(&st.db)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::bad("套餐不存在"));
+    }
+    db::audit(
+        &st.db,
+        &a.0.username,
+        "update_package",
+        &format!("#{id} {} {} {}t", req.name, req.model, req.total_tokens),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn list_audit(
+    State(st): State<AppState>,
+    _a: AuthAdmin,
+) -> AppResult<Json<serde_json::Value>> {
+    let rows: Vec<(i64, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, actor, action, detail, created_at FROM audit_logs ORDER BY id DESC LIMIT 200",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let list: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(id, actor, action, detail, created)| {
+            json!({ "id": id, "actor": actor, "action": action, "detail": detail, "created_at": created })
+        })
+        .collect();
+    Ok(Json(json!({ "audit": list })))
+}

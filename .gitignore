@@ -1,0 +1,40 @@
+# Local machine files
+.DS_Store
+.env
+*.local
+*.log
+
+# Dependencies
+node_modules/
+admin-web/node_modules/
+app/node_modules/
+
+# Frontend and Electron build outputs
+admin-web/dist/
+app/dist/
+app/release/
+dist/
+release/
+
+# Rust build outputs
+target/
+server/target/
+core/codex/codex-rs/target/
+
+# Runtime/generated resources
+app/resources/.env
+app/resources/bin/
+app/resources/deskagent-mcp.js
+
+# Test and automation artifacts
+artifacts/
+.playwright-mcp/
+test/shots/
+test/shots-*/
+screenshots/
+
+# Editor/cache files
+.idea/
+.vscode/
+*.swp
+*.swo

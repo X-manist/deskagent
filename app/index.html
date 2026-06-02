@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>智界桌面助手</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="logo">智</div>
+          <div>
+            <div class="brand-name">智界助手</div>
+            <div class="brand-sub">AI 工作助理</div>
+          </div>
+        </div>
+
+        <div class="section-title">常用技能</div>
+        <div id="skills" class="skills"></div>
+
+        <div class="section-title">快捷指令</div>
+        <div class="quick">
+          <button class="quick-btn" data-prompt="帮我把这段文字润色得更专业：">✍️ 文字润色</button>
+          <button class="quick-btn" data-prompt="请把下面内容翻译成地道的英文：">🌐 中英翻译</button>
+          <button class="quick-btn" data-prompt="帮我总结这段内容的要点：">📌 内容总结</button>
+          <button class="quick-btn" data-prompt="在工作目录创建一个 Python 脚本，实现：">🐍 写脚本</button>
+        </div>
+
+        <div class="sidebar-bottom">
+          <button id="openWorkspace" class="ghost-btn">📂 打开工作目录</button>
+          <button id="openSettings" class="ghost-btn">⚙️ 设置</button>
+          <div id="member" class="member">会员：体验版</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="status">
+            <span id="statusDot" class="dot"></span>
+            <span id="statusText">正在启动…</span>
+          </div>
+          <div class="model-tag" id="modelTag"></div>
+        </header>
+
+        <section id="messages" class="messages">
+          <div class="welcome">
+            <h1>你好，我是智界助手 👋</h1>
+            <p>我能帮你写作、翻译、整理资料、运行脚本、处理文件。直接说出你的需求即可，无需任何配置。</p>
+          </div>
+        </section>
+
+        <footer class="composer">
+          <textarea id="input" rows="1" placeholder="输入你的需求，回车发送（Shift+回车换行）…"></textarea>
+          <button id="sendBtn" class="send-btn">发送</button>
+          <button id="stopBtn" class="stop-btn hidden">停止</button>
+        </footer>
+      </main>
+    </div>
+
+    <div id="settingsModal" class="modal hidden">
+      <div class="modal-card">
+        <h2>设置</h2>
+        <label>中转站地址 (Base URL)</label>
+        <input id="setBaseUrl" type="text" placeholder="https://..." />
+        <label>密钥 / 会员令牌 (API Key)</label>
+        <input id="setApiKey" type="password" placeholder="sk-..." />
+        <label>模型</label>
+        <input id="setModel" type="text" placeholder="glm-4.6" />
+        <div class="modal-actions">
+          <button id="cancelSettings" class="ghost-btn">取消</button>
+          <button id="saveSettings" class="send-btn">保存并重启</button>
+        </div>
+        <p class="hint">提示：正式版会自动填入中转站地址与你的会员令牌，无需手动配置。</p>
+      </div>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

@@ -1,0 +1,102 @@
+{
+  "name": "deskagent",
+  "version": "0.1.0",
+  "description": "智界桌面助手 — 一键安装即用的 AI 工作助理 (agent runtime + Chinese UI)",
+  "main": "src/main/index.js",
+  "author": "agentscompany",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "imapflow": "^1.0.191",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^7.0.5",
+    "qrcode": "^1.5.4",
+    "zod": "^4.1.12"
+  },
+  "scripts": {
+    "start": "electron .",
+    "prepackage": "node scripts/prepare.js",
+    "smoke:bridge": "node ../test/bridge-smoke.js",
+    "e2e": "node ../test/e2e.js",
+    "dist": "npm run prepackage && electron-builder",
+    "dist:mac": "npm run prepackage && electron-builder --mac",
+    "dist:win": "npm run prepackage && electron-builder --win",
+    "dist:linux": "npm run prepackage && electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "playwright-core": "^1.54.1"
+  },
+  "build": {
+    "appId": "com.agentscompany.deskagent",
+    "productName": "智界桌面助手",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../agentconfig",
+        "to": "agentconfig"
+      },
+      {
+        "from": "resources",
+        "to": ".",
+        "filter": [
+          ".env",
+          "deskagent-mcp.js",
+          "codex-package.json",
+          "codex-path/**",
+          "codex-resources/**"
+        ]
+      },
+      {
+        "from": "resources/bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity",
+      "artifactName": "智界桌面助手-${version}-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "智界助手需要控制其他应用（如发送微信、自动化操作）以完成你的指令。",
+        "NSSystemAdministrationUsageDescription": "智界助手需要辅助功能权限以执行电脑控制（点击、输入、截图）。"
+      }
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "智界桌面助手-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "智界桌面助手"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility",
+      "artifactName": "智界桌面助手-${version}.${ext}"
+    }
+  }
+}

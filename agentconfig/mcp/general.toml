@@ -1,0 +1,58 @@
+# 通用 MCP 服务器配置
+#
+# 用法：将需要的 [mcp_servers.*] 段落复制到 agent runtime 的 config.toml。
+# 桌面端会写入独立的 agent home，可在打包时把这些段落合并进默认 config.toml。
+#
+# 依赖：
+#   - 带 npx 的服务器需要本机安装 Node.js（建议 18+）。
+#   - 带 uvx 的服务器需要安装 uv（https://docs.astral.sh/uv/）。
+#   - github 服务器示例使用 Docker。
+# 这些服务器在首次运行时由 npx/uvx 自动下载，无需用户手动安装。
+
+# 文件系统访问：在指定目录内读写文件（请把 /path/to/workspace 换成实际工作区目录）
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
+
+# 网页/接口抓取：把 URL 内容转为模型可读文本（联网调研技能依赖）
+[mcp_servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+
+# 顺序思考：提供结构化、分步推理工具，适合复杂规划与拆解
+[mcp_servers.sequential-thinking]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+
+# 长期记忆：基于知识图谱的记忆存取，跨会话保留事实
+[mcp_servers.memory]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+
+# 时间：时区换算与当前时间查询
+[mcp_servers.time]
+command = "uvx"
+args = ["mcp-server-time"]
+
+# Git：在本地仓库执行 git 查询与操作（把 /path/to/repo 换成实际仓库）
+[mcp_servers.git]
+command = "uvx"
+args = ["mcp-server-git", "--repository", "/path/to/repo"]
+
+# 浏览器自动化（Microsoft Playwright MCP）：导航、点击、截图、抓取动态页面
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]
+
+# SQLite：直接查询/操作本地 SQLite 数据库（把 /path/to/db.sqlite 换成实际文件）
+[mcp_servers.sqlite]
+command = "uvx"
+args = ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"]
+
+# GitHub 官方 MCP（需 Docker + 个人访问令牌 PAT）
+# 把令牌写入环境变量 GITHUB_PERSONAL_ACCESS_TOKEN
+[mcp_servers.github]
+command = "docker"
+args = ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"]
+[mcp_servers.github.env]
+GITHUB_PERSONAL_ACCESS_TOKEN = ""

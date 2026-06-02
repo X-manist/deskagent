@@ -1,0 +1,41 @@
+# 国内常用 MCP 服务器配置（地图 / 出行 / 航班）
+#
+# 用法：将需要的 [mcp_servers.*] 段落复制到 agent runtime 的 config.toml。
+# 大部分服务需要在对应开放平台申请 API Key（12306 除外）。
+# 申请到 Key 后填入下方 env 段，或改为从系统环境变量读取。
+
+# 高德地图（官方 MCP）：地理编码、路线规划、周边搜索、天气等
+# Key 申请：https://lbs.amap.com/api/mcp-server/create-project-and-key
+[mcp_servers.amap]
+command = "npx"
+args = ["-y", "@amap/amap-maps-mcp-server"]
+[mcp_servers.amap.env]
+AMAP_MAPS_API_KEY = ""
+
+# 高德地图（Streamable HTTP 远程方式，二选一）
+# key 作为 URL 查询参数传入，不使用 bearer token
+# [mcp_servers.amap]
+# url = "https://mcp.amap.com/sse?key=YOUR_AMAP_KEY"
+
+# 百度地图 MCP：地理编码、路线、POI 检索等
+# Key 申请：https://lbsyun.baidu.com/apiconsole/key
+[mcp_servers.baidu-map]
+command = "npx"
+args = ["-y", "@baidumap/mcp-server-baidu-map"]
+[mcp_servers.baidu-map.env]
+BAIDU_MAP_API_KEY = ""
+
+# 12306 火车票查询（社区开源，免 API Key）
+# 来源：https://github.com/Joooook/12306-mcp
+# 提供余票查询、车次过滤、过站与中转查询
+[mcp_servers.train-12306]
+command = "npx"
+args = ["-y", "12306-mcp"]
+
+# 飞常准 Variflight（官方 MCP）：航班查询、实时状态、机场天气、行程方案
+# Key 申请：https://mcp.variflight.com
+[mcp_servers.variflight]
+command = "npx"
+args = ["-y", "@variflight-ai/variflight-mcp"]
+[mcp_servers.variflight.env]
+VARIFLIGHT_API_KEY = ""
