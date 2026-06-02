@@ -31,10 +31,16 @@ const { _electron: electron } = require('../app/node_modules/playwright-core');
   try {
     const page = await app.firstWindow({ timeout: 30000 });
     await page.waitForSelector('#app', { timeout: 30000 });
-    await page.screenshot({ path: path.join(outDir, 'electron-ui-opened.png') });
+    await page.screenshot({ path: path.join(outDir, 'electron-login-clean.png') });
 
     assert.strictEqual(await page.locator('.rightbar').count(), 0, 'right sidebar should not exist');
     assert.strictEqual(await page.locator('#loginOverlay').count(), 1, 'login overlay should exist on first launch');
+    assert.strictEqual(await page.locator('#loginOverlay').isVisible(), true, 'login overlay should be visible on clean first launch');
+    assert.strictEqual(
+      await page.evaluate(() => document.querySelector('#loginOverlay').classList.contains('hidden')),
+      false,
+      'login overlay should not be hidden before auth state is known'
+    );
     await page.evaluate(() => document.querySelector('#loginOverlay').classList.add('hidden'));
 
     await page.click('[data-theme-choice="dark"]');
@@ -64,6 +70,17 @@ const { _electron: electron } = require('../app/node_modules/playwright-core');
     assert.strictEqual(await page.inputValue('#input'), 'OS 工具链路 UI smoke');
     await page.screenshot({ path: path.join(outDir, 'electron-input-ready.png') });
 
+    const win = await app.browserWindow(page);
+    await win.evaluate((window) => window.setSize(820, 560));
+    await page.waitForTimeout(300);
+    await page.evaluate(() => {
+      document.querySelector('#member').textContent = '会员：剩余 123,456 Token';
+      document.querySelector('#remoteStateNote').textContent = '异常';
+      document.querySelector('#remoteCode').textContent = 'ABC23456';
+      document.querySelector('#remoteMeta').textContent = '当前远程服务地址是本机地址，手机或其他设备无法直接打开扫码链接；请配置 DESKAGENT_PUBLIC_BACKEND_URL 为公网地址';
+    });
+    await page.screenshot({ path: path.join(outDir, 'electron-compact-window.png') });
+
     const metrics = await page.evaluate(() => ({
       width: innerWidth,
       height: innerHeight,
@@ -71,7 +88,11 @@ const { _electron: electron } = require('../app/node_modules/playwright-core');
       theme: document.documentElement.dataset.theme,
       hasRightbar: !!document.querySelector('.rightbar'),
       urlModalHidden: document.querySelector('#urlModal').classList.contains('hidden'),
+      loginOverlayVisible: !document.querySelector('#loginOverlay').classList.contains('hidden'),
+      sidebarBottomScrollable: document.querySelector('.sidebar-bottom').scrollHeight >= document.querySelector('.sidebar-bottom').clientHeight,
+      remoteMetaScrollable: document.querySelector('#remoteMeta').scrollHeight >= document.querySelector('#remoteMeta').clientHeight,
     }));
+    assert.strictEqual(metrics.overflowX, false, 'compact window should not create horizontal overflow');
 
     console.log(JSON.stringify({
       ok: true,
@@ -83,13 +104,16 @@ const { _electron: electron } = require('../app/node_modules/playwright-core');
         'url_attachment_modal_clickable',
         'composer_accepts_input',
         'rightbar_absent',
+        'clean_launch_login_visible',
+        'compact_window_no_horizontal_overflow',
       ],
       metrics,
       screenshots: [
-        path.join(outDir, 'electron-ui-opened.png'),
+        path.join(outDir, 'electron-login-clean.png'),
         path.join(outDir, 'electron-settings-modal.png'),
         path.join(outDir, 'electron-url-modal.png'),
         path.join(outDir, 'electron-input-ready.png'),
+        path.join(outDir, 'electron-compact-window.png'),
       ],
     }, null, 2));
   } finally {

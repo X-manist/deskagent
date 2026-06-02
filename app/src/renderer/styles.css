@@ -258,6 +258,7 @@ button {
 
 .sidebar-sessions {
   flex: 1 1 auto;
+  min-height: 72px;
 }
 
 .skills {
@@ -366,9 +367,12 @@ button {
 
 .sidebar-bottom {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   flex-direction: column;
   gap: 7px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-top: 2px;
 }
 
@@ -382,14 +386,13 @@ button {
 }
 
 .member {
-  min-height: 24px;
+  min-height: 0;
   padding: 5px 4px 0;
-  overflow: hidden;
+  overflow: visible;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
 }
 
 .sidebar-remote {
@@ -408,6 +411,7 @@ button {
 
 .remote-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -418,8 +422,12 @@ button {
 }
 
 #remoteStateNote {
+  max-width: 100%;
+  overflow: hidden;
   color: var(--muted);
   font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .remote-qr {
@@ -451,13 +459,18 @@ button {
   font-size: 18px;
   font-weight: 750;
   letter-spacing: 0;
+  text-align: center;
+  word-break: break-all;
 }
 
 .remote-meta {
-  min-height: 32px;
+  min-height: 0;
+  max-height: 48px;
+  overflow-y: auto;
   color: var(--muted);
   font-size: 11.5px;
   line-height: 1.4;
+  word-break: break-word;
 }
 
 .remote-actions {
@@ -493,7 +506,9 @@ button {
 .topbar {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
+  align-content: center;
   justify-content: space-between;
   gap: 14px;
   min-height: 58px;
@@ -509,6 +524,7 @@ button {
 
 .topbar-title {
   display: flex;
+  flex: 1 1 220px;
   flex-direction: column;
   min-width: 0;
   gap: 2px;
@@ -564,7 +580,10 @@ button {
 
 .theme-switcher {
   display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
   min-width: 0;
   padding: 4px;
@@ -1031,6 +1050,7 @@ button {
 
 .composer-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 9px;
   min-height: 36px;
@@ -1263,6 +1283,7 @@ button {
 
 .modal-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
@@ -1318,6 +1339,7 @@ body.dragging #app::after {
   align-items: center;
   justify-content: center;
   padding: 18px;
+  overflow: auto;
   background:
     linear-gradient(135deg, rgba(255,255,255,0.52), rgba(255,255,255,0.18)),
     var(--bg);
@@ -1334,6 +1356,7 @@ body.dragging #app::after {
   display: flex;
   width: 374px;
   max-width: 94vw;
+  max-height: calc(100vh - 36px);
   flex-direction: column;
   align-items: stretch;
   gap: 13px;
@@ -1342,6 +1365,8 @@ body.dragging #app::after {
   border-radius: var(--radius);
   background: var(--paper-strong);
   box-shadow: var(--shadow);
+  margin: auto 0;
+  overflow: auto;
 }
 
 .login-logo {
@@ -1375,16 +1400,17 @@ body.dragging #app::after {
 
 .login-code-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .login-code-row input {
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 142px;
 }
 
 .login-code-row .ghost-btn {
-  flex: 0 0 auto;
+  flex: 1 0 112px;
   white-space: nowrap;
 }
 
@@ -1508,10 +1534,48 @@ body.dragging #app::after {
   }
 }
 
+@media (max-height: 760px) {
+  .sidebar {
+    padding-block: 12px;
+    gap: 8px;
+  }
+
+  .sidebar-top .skills {
+    max-height: 18vh;
+  }
+
+  .sidebar-bottom {
+    gap: 6px;
+  }
+
+  .remote-qr {
+    min-height: 88px;
+  }
+
+  .remote-qr img {
+    width: 78px;
+    height: 78px;
+  }
+
+  .remote-code {
+    min-height: 32px;
+    font-size: 15px;
+  }
+
+  .remote-meta {
+    max-height: 36px;
+  }
+}
+
 @media (max-height: 660px) {
   .sidebar {
     padding-block: 12px;
     gap: 8px;
+  }
+
+  .section-title {
+    min-height: 18px;
+    margin-bottom: 4px;
   }
 
   .brand {
@@ -1530,7 +1594,30 @@ body.dragging #app::after {
   }
 
   .sidebar-top .skills {
-    max-height: 20vh;
+    max-height: 42px;
+  }
+
+  .sidebar-sessions {
+    flex: 0 1 auto;
+    min-height: 48px;
+  }
+
+  .skills {
+    min-height: 38px;
+  }
+
+  .skill-btn {
+    min-height: 36px;
+    padding: 7px 8px;
+  }
+
+  .sessions:empty::before {
+    padding: 7px 9px;
+  }
+
+  .ghost-btn {
+    min-height: 32px;
+    padding: 6px 9px;
   }
 
   .sidebar-remote {
@@ -1538,14 +1625,23 @@ body.dragging #app::after {
     padding: 8px;
   }
 
-  .remote-qr,
-  .remote-meta {
+  .remote-qr {
     display: none;
+  }
+
+  .remote-meta {
+    display: block;
+    max-height: 30px;
   }
 
   .remote-code {
     min-height: 30px;
     font-size: 15px;
+  }
+
+  .remote-actions .mini-btn {
+    min-height: 28px;
+    padding: 4px 6px;
   }
 
   .messages {

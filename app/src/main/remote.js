@@ -19,6 +19,42 @@ function isAbortError(error) {
   return error && (error.name === 'AbortError' || /aborted/i.test(String(error.message || '')));
 }
 
+function localBackendReason(value) {
+  try {
+    const url = new URL(String(value || ''));
+    const host = url.hostname.toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+      return '当前远程服务地址是本机地址，手机或其他设备无法直接打开扫码链接';
+    }
+  } catch (_) {}
+  return '';
+}
+
+function forwardedPublicHeaders(value) {
+  if (!value) return {};
+  try {
+    const url = new URL(String(value).replace(/\/+$/, ''));
+    return {
+      'X-Forwarded-Proto': url.protocol.replace(':', ''),
+      'X-Forwarded-Host': url.host,
+    };
+  } catch (_) {
+    return {};
+  }
+}
+
+function remoteWebUrl(baseUrl, code) {
+  const base = String(baseUrl || '').replace(/\/+$/, '');
+  if (!base || !code) return '';
+  try {
+    const url = new URL('/remote', `${base}/`);
+    url.searchParams.set('code', code);
+    return url.toString();
+  } catch (_) {
+    return `${base}/remote?code=${encodeURIComponent(code)}`;
+  }
+}
+
 class RemoteHost extends EventEmitter {
   constructor(opts) {
     super();
@@ -41,6 +77,10 @@ class RemoteHost extends EventEmitter {
     return String(this.opts.backendUrl || '').replace(/\/+$/, '');
   }
 
+  publicBackendUrl() {
+    return String(this.opts.publicBackendUrl || '').replace(/\/+$/, '');
+  }
+
   engine() {
     return this.opts.engine ? this.opts.engine() : null;
   }
@@ -51,7 +91,10 @@ class RemoteHost extends EventEmitter {
   }
 
   headers(machine = false) {
-    const headers = { 'Content-Type': 'application/json' };
+    const headers = {
+      'Content-Type': 'application/json',
+      ...forwardedPublicHeaders(this.publicBackendUrl()),
+    };
     if (machine) {
       if (this.machineToken) headers.Authorization = `Bearer ${this.machineToken}`;
     } else {
@@ -97,11 +140,20 @@ class RemoteHost extends EventEmitter {
   async start() {
     if (this.running || !this.isLoggedIn()) return;
     this.running = true;
-    await this.register();
-    await this.refreshPairing();
-    this.startHeartbeat();
-    this.pollLoop();
     this.emitState();
+    try {
+      await this.register();
+      await this.refreshPairing();
+      this.startHeartbeat();
+      this.pollLoop();
+      this.emitState();
+    } catch (e) {
+      this.running = false;
+      this.machineToken = '';
+      this.lastError = (e && e.message) || String(e);
+      this.emitState();
+      throw e;
+    }
   }
 
   async stop() {
@@ -140,12 +192,14 @@ class RemoteHost extends EventEmitter {
       method: 'POST',
       body: {},
     });
+    const publicBackendUrl = this.publicBackendUrl();
     this.pairing = {
       code: res.code,
       expiresAt: res.expires_at,
       payload: {
         ...(res.payload || {}),
-        server_url: this.backendUrl(),
+        server_url: publicBackendUrl || (res.payload && res.payload.server_url) || this.backendUrl(),
+        ...(publicBackendUrl ? { web_url: remoteWebUrl(publicBackendUrl, res.code) } : {}),
       },
     };
     if (this.pairing.payload) {
@@ -248,9 +302,18 @@ class RemoteHost extends EventEmitter {
   }
 
   info() {
+    const backendLocalReason = localBackendReason(this.backendUrl());
+    const hasPublicBackend = !!this.publicBackendUrl();
     return {
       enabled: this.running,
       loggedIn: this.isLoggedIn(),
+      backendUrl: this.backendUrl(),
+      publicBackendUrl: this.publicBackendUrl(),
+      backendIsLocal: !!backendLocalReason,
+      remoteLinkIsLocal: !!backendLocalReason && !hasPublicBackend,
+      remoteLinkLocalReason: backendLocalReason && !hasPublicBackend
+        ? `${backendLocalReason}；请配置 DESKAGENT_PUBLIC_BACKEND_URL 为公网地址`
+        : '',
       machineId: this.machineId,
       hasMachineToken: !!this.machineToken,
       pairing: this.pairing,

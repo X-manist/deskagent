@@ -14,6 +14,11 @@ loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 // upstream key: it authenticates the member's JWT here and the backend forwards
 // to the real relay while metering token usage.
 const BACKEND_URL = (process.env.DESKAGENT_BACKEND_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
+const PUBLIC_BACKEND_URL = (
+  process.env.DESKAGENT_PUBLIC_BACKEND_URL ||
+  process.env.DESKAGENT_REMOTE_PUBLIC_URL ||
+  ''
+).replace(/\/+$/, '');
 
 const DEFAULT_SETTINGS = {
   // Production default points at the team relay (OpenAI-compatible gateway).
@@ -453,6 +458,7 @@ app.whenReady().then(async () => {
     baseDir: paths.base,
     workspaceDir: paths.workspaceDir,
     backendUrl: BACKEND_URL,
+    publicBackendUrl: PUBLIC_BACKEND_URL,
     appVersion: app.getVersion ? app.getVersion() : '0.1.0',
     auth: () => auth,
     engine: () => engine,

@@ -333,6 +333,9 @@ function formatExpiresAt(value) {
 function renderRemoteState(state) {
   remoteState = state || {};
   if (!remoteStateNote || !remoteCodeEl || !remoteMetaEl) return;
+  const localBackendMessage = remoteState.remoteLinkLocalReason || (remoteState.remoteLinkIsLocal
+    ? '当前远程服务地址是本机地址，手机或其他设备无法直接打开扫码链接'
+    : '');
   if (!remoteState.loggedIn) {
     remoteStateNote.textContent = '待登录';
     remoteCodeEl.textContent = '--------';
@@ -346,9 +349,9 @@ function renderRemoteState(state) {
     return;
   }
   if (!remoteState.enabled) {
-    remoteStateNote.textContent = remoteState.lastError ? '异常' : '启动中';
+    remoteStateNote.textContent = remoteState.lastError ? '异常' : '未连接';
     remoteCodeEl.textContent = '--------';
-    remoteMetaEl.textContent = remoteState.lastError || '正在注册本机远程连接';
+    remoteMetaEl.textContent = remoteState.lastError || localBackendMessage || '正在注册本机远程连接';
     if (remoteQrEl) {
       remoteQrEl.removeAttribute('src');
       remoteQrEl.classList.add('hidden');
@@ -370,7 +373,7 @@ function renderRemoteState(state) {
     }
   }
   const exp = formatExpiresAt(pairing.expiresAt);
-  remoteMetaEl.textContent = remoteState.lastError || (exp ? `连接码 ${exp} 过期` : '手机 App 扫描后可连接这台电脑');
+  remoteMetaEl.textContent = remoteState.lastError || localBackendMessage || (exp ? `连接码 ${exp} 过期` : '手机 App 扫描后可连接这台电脑');
   if (refreshRemoteBtn) refreshRemoteBtn.disabled = false;
   if (copyRemoteBtn) copyRemoteBtn.disabled = !pairing.qrText;
 }
