@@ -81,7 +81,7 @@ function sseLines(events) {
     agentHome,
     workspaceDir,
     settings: () => ({
-      model: 'gpt-5.4-mini',
+      model: 'test-relay-model',
       apiKey: 'test-key',
       baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
       mcpProfile: 'core',

@@ -121,7 +121,16 @@ function Orders() {
   );
 }
 
-const EMPTY_PKG = { name: '', model: 'gpt-5.4-mini', total_tokens: 1000000, price_cents: 1990, duration_days: 30, active: true, sort_order: 0 };
+const EMPTY_PKG = {
+  name: '',
+  model: 'glm-5.1',
+  total_tokens: 1000000,
+  token_multiplier: 1,
+  price_cents: 1990,
+  duration_days: 30,
+  active: true,
+  sort_order: 0,
+};
 
 function PackageModal({ initial, onClose, onSaved }) {
   const [p, setP] = useState(initial);
@@ -133,7 +142,9 @@ function PackageModal({ initial, onClose, onSaved }) {
     try {
       const body = {
         name: p.name, model: p.model,
-        total_tokens: Number(p.total_tokens), price_cents: Number(p.price_cents),
+        total_tokens: Number(p.total_tokens),
+        token_multiplier: Number(p.token_multiplier || 1),
+        price_cents: Number(p.price_cents),
         duration_days: Number(p.duration_days), active: !!p.active, sort_order: Number(p.sort_order),
       };
       if (p.id) await api(`/admin/api/packages/${p.id}`, { method: 'PUT', body });
@@ -147,7 +158,8 @@ function PackageModal({ initial, onClose, onSaved }) {
         <h2>{p.id ? '编辑套餐' : '新建套餐'}</h2>
         <div className="field"><label>名称</label><input value={p.name} onChange={(e) => set('name', e.target.value)} /></div>
         <div className="field"><label>模型</label><input value={p.model} onChange={(e) => set('model', e.target.value)} /></div>
-        <div className="field"><label>总 Token 数</label><input type="number" value={p.total_tokens} onChange={(e) => set('total_tokens', e.target.value)} /></div>
+        <div className="field"><label>积分数</label><input type="number" min="1" value={p.total_tokens} onChange={(e) => set('total_tokens', e.target.value)} /></div>
+        <div className="field"><label>计费倍率</label><input type="number" min="0.01" step="0.01" value={p.token_multiplier ?? 1} onChange={(e) => set('token_multiplier', e.target.value)} /></div>
         <div className="field"><label>价格(分)</label><input type="number" value={p.price_cents} onChange={(e) => set('price_cents', e.target.value)} /></div>
         <div className="field"><label>有效天数</label><input type="number" value={p.duration_days} onChange={(e) => set('duration_days', e.target.value)} /></div>
         <div className="row">
@@ -177,11 +189,12 @@ function Packages() {
       </div>
       {err && <div className="err">{err}</div>}
       <table>
-        <thead><tr><th>ID</th><th>名称</th><th>模型</th><th>总Token</th><th>价格(元)</th><th>天数</th><th>状态</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>名称</th><th>模型</th><th>积分数</th><th>倍率</th><th>价格(元)</th><th>天数</th><th>状态</th><th></th></tr></thead>
         <tbody>
           {list.map((p) => (
             <tr key={p.id}>
               <td>{p.id}</td><td>{p.name}</td><td>{p.model}</td><td>{p.total_tokens}</td>
+              <td>{Number(p.token_multiplier || 1).toFixed(2)}x</td>
               <td>{(p.price_cents / 100).toFixed(2)}</td><td>{p.duration_days}</td>
               <td>{p.active ? '上架' : '下架'}</td>
               <td><button className="ghost" onClick={() => setEditing(p)}>编辑</button></td>

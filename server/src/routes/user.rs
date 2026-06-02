@@ -178,8 +178,8 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
             .fetch_one(&st.db)
             .await?;
 
-    let ents: Vec<(String, i64, i64, String)> = sqlx::query_as(
-        "SELECT model, token_allowance, tokens_used, expires_at FROM entitlements
+    let ents: Vec<(String, i64, f64, i64, String)> = sqlx::query_as(
+        "SELECT model, token_allowance, token_multiplier, tokens_used, expires_at FROM entitlements
          WHERE user_id = ? AND status='active' AND expires_at > datetime('now')
          ORDER BY expires_at ASC",
     )
@@ -189,10 +189,12 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
 
     let entitlements: Vec<serde_json::Value> = ents
         .into_iter()
-        .map(|(model, allow, used, exp)| {
+        .map(|(model, allow, multiplier, used, exp)| {
             json!({
                 "model": model,
                 "token_allowance": allow,
+                "points": allow,
+                "token_multiplier": multiplier,
                 "tokens_used": used,
                 "tokens_remaining": (allow - used).max(0),
                 "expires_at": exp,
@@ -217,18 +219,19 @@ async fn me(State(st): State<AppState>, user: AuthUser) -> AppResult<Json<serde_
 }
 
 async fn packages(State(st): State<AppState>) -> AppResult<Json<serde_json::Value>> {
-    let rows: Vec<(i64, String, String, i64, i64, i64)> = sqlx::query_as(
-        "SELECT id, name, model, total_tokens, price_cents, duration_days FROM packages
+    let rows: Vec<(i64, String, String, i64, f64, i64, i64)> = sqlx::query_as(
+        "SELECT id, name, model, total_tokens, token_multiplier, price_cents, duration_days FROM packages
          WHERE active = 1 ORDER BY sort_order ASC, id ASC",
     )
     .fetch_all(&st.db)
     .await?;
     let list: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(id, name, model, tokens, price, days)| {
+        .map(|(id, name, model, tokens, multiplier, price, days)| {
             json!({
                 "id": id, "name": name, "model": model,
-                "total_tokens": tokens, "price_cents": price,
+                "total_tokens": tokens, "points": tokens, "token_allowance": tokens,
+                "token_multiplier": multiplier, "price_cents": price,
                 "price_yuan": format!("{:.2}", price as f64 / 100.0),
                 "duration_days": days,
             })

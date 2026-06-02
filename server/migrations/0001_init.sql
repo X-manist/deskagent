@@ -21,12 +21,13 @@ CREATE TABLE IF NOT EXISTS sms_throttle (
   lockout_until TEXT
 );
 
--- Purchasable plans. Admin sets model + total_tokens (allowance).
+-- Purchasable plans. Admin sets model, point allowance, price, and billing multiplier.
 CREATE TABLE IF NOT EXISTS packages (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   name          TEXT NOT NULL,
   model         TEXT NOT NULL,
   total_tokens  INTEGER NOT NULL,
+  token_multiplier REAL NOT NULL DEFAULT 1.0,
   price_cents   INTEGER NOT NULL,
   duration_days INTEGER NOT NULL,
   active        INTEGER NOT NULL DEFAULT 1,
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS orders (
   pkg_name       TEXT NOT NULL,
   pkg_model      TEXT NOT NULL,
   pkg_tokens     INTEGER NOT NULL,
+  pkg_token_multiplier REAL NOT NULL DEFAULT 1.0,
   pkg_days       INTEGER NOT NULL,
   amount_cents   INTEGER NOT NULL,
   provider       TEXT NOT NULL,            -- manual | alipay | wechat
@@ -64,6 +66,7 @@ CREATE TABLE IF NOT EXISTS entitlements (
   order_id        INTEGER REFERENCES orders(id),
   model           TEXT NOT NULL,
   token_allowance INTEGER NOT NULL,
+  token_multiplier REAL NOT NULL DEFAULT 1.0,
   tokens_used     INTEGER NOT NULL DEFAULT 0,
   status          TEXT NOT NULL DEFAULT 'active',
   starts_at       TEXT NOT NULL DEFAULT (datetime('now')),

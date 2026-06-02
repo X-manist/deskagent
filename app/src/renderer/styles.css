@@ -1295,6 +1295,38 @@ button {
   font-size: 12px;
 }
 
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(88px, auto) minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-soft);
+}
+
+.settings-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: right;
+}
+
 .modal-card input,
 .login-card input {
   width: 100%;
@@ -1576,7 +1608,7 @@ body.dragging #app::after {
   }
 
   .sidebar-bottom {
-    gap: 6px;
+    gap: 5px;
   }
 
   .remote-qr {
@@ -1594,7 +1626,10 @@ body.dragging #app::after {
   }
 
   .remote-meta {
-    max-height: 36px;
+    max-height: 22px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
@@ -1647,13 +1682,13 @@ body.dragging #app::after {
   }
 
   .ghost-btn {
-    min-height: 32px;
-    padding: 6px 9px;
+    min-height: 30px;
+    padding: 5px 9px;
   }
 
   .sidebar-remote {
-    gap: 6px;
-    padding: 8px;
+    gap: 5px;
+    padding: 7px 8px;
   }
 
   .remote-qr {
@@ -1662,17 +1697,19 @@ body.dragging #app::after {
 
   .remote-meta {
     display: block;
-    max-height: 30px;
+    max-height: 17px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .remote-code {
-    min-height: 30px;
-    font-size: 15px;
+    min-height: 28px;
+    font-size: 14px;
   }
 
-  .remote-actions .mini-btn {
-    min-height: 28px;
-    padding: 4px 6px;
+  .remote-actions {
+    display: none;
   }
 
   .messages {

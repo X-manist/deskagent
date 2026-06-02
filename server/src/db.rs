@@ -1,6 +1,6 @@
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
 use crate::config::Config;
@@ -21,6 +21,51 @@ pub async fn connect(cfg: &Config) -> Result<SqlitePool> {
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     let sql = include_str!("../migrations/0001_init.sql");
     sqlx::raw_sql(sql).execute(pool).await?;
+    ensure_column(
+        pool,
+        "packages",
+        "token_multiplier",
+        "REAL NOT NULL DEFAULT 1.0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "orders",
+        "pkg_token_multiplier",
+        "REAL NOT NULL DEFAULT 1.0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "entitlements",
+        "token_multiplier",
+        "REAL NOT NULL DEFAULT 1.0",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await?;
+    let exists = rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|name| name == column)
+            .unwrap_or(false)
+    });
+    if !exists {
+        sqlx::query(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 
@@ -71,11 +116,12 @@ pub async fn bootstrap(pool: &SqlitePool, cfg: &Config) -> Result<()> {
         ];
         for (name, model, tokens, price, days, sort) in defaults {
             sqlx::query(
-                "INSERT INTO packages (name, model, total_tokens, price_cents, duration_days, sort_order) VALUES (?,?,?,?,?,?)",
+                "INSERT INTO packages (name, model, total_tokens, token_multiplier, price_cents, duration_days, sort_order) VALUES (?,?,?,?,?,?,?)",
             )
             .bind(name)
             .bind(model)
             .bind(tokens)
+            .bind(1.0f64)
             .bind(price)
             .bind(days)
             .bind(sort)

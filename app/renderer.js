@@ -25,6 +25,7 @@ const urlInput = $('#urlInput');
 const urlErr = $('#urlErr');
 const cancelUrlBtn = $('#cancelUrl');
 const downloadUrlBtn = $('#downloadUrl');
+const settingsModel = $('#settingsModel');
 
 let attachments = [];
 const THEME_STORAGE_KEY = 'deskagent.themeMode';
@@ -645,22 +646,11 @@ if (copyRemoteBtn) {
 
 // Settings modal
 const modal = $('#settingsModal');
-$('#openSettings').addEventListener('click', () => modal.classList.remove('hidden'));
-$('#cancelSettings').addEventListener('click', () => modal.classList.add('hidden'));
-$('#saveSettings').addEventListener('click', async () => {
-  await window.api.saveSettings({
-    baseUrl: $('#setBaseUrl').value.trim(),
-    apiKey: $('#setApiKey').value.trim(),
-    model: $('#setModel').value.trim(),
-  });
-  modal.classList.add('hidden');
-  sessionsLoaded = false;
-  const conv = activeConv();
-  if (conv) {
-    conv.items = [];
-    renderActive();
-  }
+$('#openSettings').addEventListener('click', () => {
+  if (settingsModel) settingsModel.textContent = (modelTag.textContent || '').replace(/^模型：/, '') || '登录后自动获取';
+  modal.classList.remove('hidden');
 });
+$('#cancelSettings').addEventListener('click', () => modal.classList.add('hidden'));
 
 // ---- Engine events (all routed by threadId) ----
 window.api.on('engine:status', (p) => setLifecycle(p.state, p.message));
@@ -775,9 +765,7 @@ window.api.on('chat:historyLoaded', (p) => {
     activeId = info.currentThreadId;
   }
   modelTag.textContent = '模型：' + (info.settings.model || '');
-  $('#setBaseUrl').value = info.settings.baseUrl || '';
-  $('#setApiKey').value = info.settings.apiKey || '';
-  $('#setModel').value = info.settings.model || '';
+  if (settingsModel) settingsModel.textContent = info.settings.model || '登录后自动获取';
   const skillsEl = $('#skills');
   skillsEl.innerHTML = '';
   (info.skills || []).forEach((s) => {
@@ -912,7 +900,8 @@ async function openAccount() {
     if (ents.length) {
       ents.forEach((e) => {
         const pct = e.token_allowance ? Math.max(0, Math.min(100, (e.tokens_remaining / e.token_allowance) * 100)) : 0;
-        html += `<div style="margin-top:8px">套餐(${e.model})：剩余 ${e.tokens_remaining.toLocaleString()} / ${e.token_allowance.toLocaleString()} Token（至 ${e.expires_at}）`;
+        const multiplier = Number(e.token_multiplier || 1).toFixed(2);
+        html += `<div style="margin-top:8px">套餐(${e.model})：剩余 ${e.tokens_remaining.toLocaleString()} / ${e.token_allowance.toLocaleString()} 积分 · ${multiplier}x（至 ${e.expires_at}）`;
         html += `<div class="quota-bar"><span style="width:${pct}%"></span></div></div>`;
       });
     } else {
@@ -924,8 +913,9 @@ async function openAccount() {
     (packages || []).forEach((p) => {
       const row = document.createElement('div');
       row.className = 'pkg';
+      const multiplier = Number(p.token_multiplier || 1).toFixed(2);
       row.innerHTML = `<div><div class="pkg-name">${p.name}</div>` +
-        `<div class="pkg-meta">${p.model} · ${p.total_tokens.toLocaleString()} Token · ${p.duration_days} 天</div></div>` +
+        `<div class="pkg-meta">${p.model} · ${p.total_tokens.toLocaleString()} 积分 · ${multiplier}x · ${p.duration_days} 天</div></div>` +
         `<div style="display:flex;align-items:center;gap:10px"><span class="pkg-price">¥${p.price_yuan}</span>` +
         `<button class="send-btn">购买</button></div>`;
       row.querySelector('button').addEventListener('click', () => buyPackage(p, errEl));

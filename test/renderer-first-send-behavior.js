@@ -112,8 +112,8 @@ class TestEvent {
 const ids = [
   'messages', 'input', 'sendBtn', 'stopBtn', 'statusDot', 'statusText', 'modelTag',
   'sessions', 'newSessionBtn', 'attachments', 'attachBtn', 'attachMenu', 'openWorkspace',
-  'openSettings', 'settingsModal', 'cancelSettings', 'saveSettings', 'setBaseUrl',
-  'setApiKey', 'setModel', 'skills', 'loginOverlay', 'accountModal', 'member',
+  'openSettings', 'settingsModal', 'cancelSettings', 'settingsModel', 'settingsWorkspace',
+  'skills', 'loginOverlay', 'accountModal', 'member',
   'sendCodeBtn', 'loginPhone', 'loginCode', 'loginErr', 'loginBtn', 'accountInfo',
   'packageList', 'accountErr', 'closeAccount', 'logoutBtn', 'cancelSettings',
 ];
@@ -178,7 +178,6 @@ async function runScenario({ trigger, currentThreadOnSend }) {
       pickAttachments: async () => ({ canceled: true, items: [] }),
       getPathForFile: () => '',
       openWorkspace: async () => ({ ok: true }),
-      saveSettings: async () => ({ ok: true }),
       auth: {
         status: async () => ({ loggedIn: false }),
         me: async () => ({ entitlements: [], free_turns_remaining: 0 }),

@@ -201,6 +201,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
         name: '系统测试临时套餐',
         model: 'system-e2e-model',
         total_tokens: 8888,
+        token_multiplier: 1.25,
         price_cents: 88,
         duration_days: 7,
         active: true,
@@ -215,6 +216,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
         name: '系统测试临时套餐-下架',
         model: 'system-e2e-model',
         total_tokens: 9999,
+        token_multiplier: 1.5,
         price_cents: 99,
         duration_days: 8,
         active: false,
@@ -250,6 +252,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
     const publicPackages = await jsonFetch(baseUrl, '/api/packages');
     assert.ok(publicPackages.packages.some((p) => p.id === basePackage.id));
     assert.ok(!publicPackages.packages.some((p) => p.id === createdPkg.id));
+    assert.ok(publicPackages.packages.every((p) => typeof p.token_multiplier === 'number'));
 
     const meBefore = await jsonFetch(baseUrl, '/api/me', { token: userToken });
     assert.strictEqual(meBefore.free_turns_remaining, 2);
@@ -321,6 +324,45 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
     const entitlementAfterChat = meAfterChat.entitlements.find((e) => e.model === basePackage.model);
     assert.strictEqual(entitlementAfterChat.tokens_used, 1234 + 4321);
 
+    const multiplierPkg = await jsonFetch(baseUrl, '/admin/api/packages', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        name: '倍率测试套餐',
+        model: 'multiplier-e2e-model',
+        total_tokens: 10000,
+        token_multiplier: 2.5,
+        price_cents: 100,
+        duration_days: 7,
+        active: true,
+        sort_order: 100,
+      },
+    });
+    const multiplierOrder = await jsonFetch(baseUrl, '/api/orders', {
+      method: 'POST',
+      token: userToken,
+      body: { package_id: multiplierPkg.id, provider: 'manual' },
+    });
+    await jsonFetch(baseUrl, `/api/orders/${multiplierOrder.out_trade_no}/confirm`, {
+      method: 'POST',
+      token: userToken,
+    });
+    const multiplierStream = await streamFetch(baseUrl, '/v1/responses', {
+      token: userToken,
+      body: {
+        model: 'multiplier-e2e-model',
+        stream: true,
+        input: 'multiplier metering smoke',
+        test_total_tokens: 1000,
+      },
+    });
+    assert.ok(multiplierStream.includes('hello from fake upstream'));
+    const meAfterMultiplier = await jsonFetch(baseUrl, '/api/me', { token: userToken });
+    const multiplierEnt = meAfterMultiplier.entitlements.find((e) => e.model === 'multiplier-e2e-model');
+    assert.ok(multiplierEnt);
+    assert.strictEqual(multiplierEnt.token_multiplier, 2.5);
+    assert.strictEqual(multiplierEnt.tokens_used, 2500);
+
     const users = await jsonFetch(baseUrl, '/admin/api/users', { token: adminToken });
     assert.strictEqual(users.users.length, 1);
     assert.strictEqual(users.users[0].phone, '13800138000');
@@ -336,7 +378,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
 
     const finalStats = await jsonFetch(baseUrl, '/admin/api/stats', { token: adminToken });
     assert.strictEqual(finalStats.users_total, 1);
-    assert.strictEqual(finalStats.orders_paid, 1);
+    assert.strictEqual(finalStats.orders_paid, 2);
     assert.ok(finalStats.tokens_total >= 1234);
 
     console.log(JSON.stringify({
@@ -351,6 +393,7 @@ async function streamFetch(baseUrl, pathname, { token, body, expect = 200 } = {}
         'gateway_streaming_metering',
         'gateway_upstream_failure_refund',
         'gateway_chat_completions_metering',
+        'package_multiplier_metering',
       ],
     }, null, 2));
   } finally {

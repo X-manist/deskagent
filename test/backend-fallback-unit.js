@@ -25,7 +25,7 @@ assert.ok(
   'backend availability should be checked before Engine construction'
 );
 assert.ok(
-  text.includes('本地会员服务未启动，开发模式直连中转站'),
+  text.includes('本地会员服务未启动，开发模式直连模型通道'),
   'fallback status should explain the localhost backend condition'
 );
 assert.ok(

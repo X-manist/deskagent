@@ -10,6 +10,19 @@ pub struct Reservation {
     pub entitlement_id: Option<i64>,
     pub model: String,
     pub reserved_tokens: i64,
+    pub token_multiplier: f64,
+}
+
+fn charge_tokens(tokens: i64, multiplier: f64) -> i64 {
+    if tokens <= 0 {
+        return 0;
+    }
+    let safe_multiplier = if multiplier.is_finite() && multiplier > 0.0 {
+        multiplier
+    } else {
+        1.0
+    };
+    ((tokens as f64) * safe_multiplier).ceil() as i64
 }
 
 /// Atomically reserve capacity for one request.
@@ -26,28 +39,27 @@ pub async fn reserve(
     let mut tx = db.begin().await?;
 
     // 1) Try paid entitlements (oldest-expiring first) with a conditional UPDATE.
-    let candidates: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM entitlements
+    let candidates: Vec<(i64, f64)> = sqlx::query_as(
+        "SELECT id, token_multiplier FROM entitlements
          WHERE user_id = ? AND model = ? AND status = 'active'
            AND expires_at > datetime('now')
-           AND token_allowance - tokens_used >= ?
          ORDER BY expires_at ASC",
     )
     .bind(user_id)
     .bind(model)
-    .bind(reserve_tokens)
     .fetch_all(&mut *tx)
     .await?;
 
-    for ent_id in candidates {
+    for (ent_id, multiplier) in candidates {
+        let reserve_charge = charge_tokens(reserve_tokens, multiplier);
         let res = sqlx::query(
             "UPDATE entitlements SET tokens_used = tokens_used + ?
              WHERE id = ? AND status = 'active' AND expires_at > datetime('now')
                AND token_allowance - tokens_used >= ?",
         )
-        .bind(reserve_tokens)
+        .bind(reserve_charge)
         .bind(ent_id)
-        .bind(reserve_tokens)
+        .bind(reserve_charge)
         .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 1 {
@@ -60,7 +72,7 @@ pub async fn reserve(
             .bind(user_id)
             .bind(ent_id)
             .bind(model)
-            .bind(reserve_tokens)
+            .bind(reserve_charge)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -69,7 +81,8 @@ pub async fn reserve(
                 source: "entitlement".into(),
                 entitlement_id: Some(ent_id),
                 model: model.into(),
-                reserved_tokens: reserve_tokens,
+                reserved_tokens: reserve_charge,
+                token_multiplier: multiplier,
             });
         }
     }
@@ -98,6 +111,7 @@ pub async fn reserve(
             entitlement_id: None,
             model: model.into(),
             reserved_tokens: 0,
+            token_multiplier: 1.0,
         });
     }
 
@@ -132,8 +146,9 @@ pub async fn reconcile(
 ) {
     match actual_total {
         Some(total) => {
+            let charged_total = charge_tokens(total, r.token_multiplier);
             if let (Some(ent_id), "entitlement") = (r.entitlement_id, r.source.as_str()) {
-                let delta = total - r.reserved_tokens;
+                let delta = charged_total - r.reserved_tokens;
                 let _ = sqlx::query(
                     "UPDATE entitlements SET tokens_used = tokens_used + ? WHERE id = ?",
                 )

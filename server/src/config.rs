@@ -80,7 +80,7 @@ impl Config {
         let default_model = if provider == "glm" {
             ev("GLM_MODEL", "glm-5.1")
         } else {
-            ev("ADAPTER_MODEL", &ev("OPENAI_MODEL", "gpt-5.4-mini"))
+            ev("ADAPTER_MODEL", &ev("OPENAI_MODEL", "glm-5.1"))
         };
         Config {
             database_url: ev("DATABASE_URL", "sqlite://deskagent.db?mode=rwc"),

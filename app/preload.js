@@ -3,7 +3,6 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   bootstrap: () => ipcRenderer.invoke('app:bootstrap'),
-  saveSettings: (s) => ipcRenderer.invoke('app:saveSettings', s),
   send: (text, attachments, threadId) => ipcRenderer.invoke('chat:send', { text, attachments, threadId }),
   pickAttachments: (kind) => ipcRenderer.invoke('app:pickAttachments', kind),
   downloadAttachment: (url) => ipcRenderer.invoke('app:downloadAttachment', url),

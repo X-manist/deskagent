@@ -55,6 +55,10 @@ const { _electron: electron } = require('../app/node_modules/playwright-core');
 
     await page.click('#openSettings');
     await page.waitForSelector('#settingsModal:not(.hidden)', { timeout: 5000 });
+    assert.strictEqual(await page.locator('#setBaseUrl').count(), 0, 'manual base URL input should not exist');
+    assert.strictEqual(await page.locator('#setApiKey').count(), 0, 'manual API key input should not exist');
+    assert.strictEqual(await page.locator('#setModel').count(), 0, 'manual model input should not exist');
+    assert.strictEqual(await page.locator('#saveSettings').count(), 0, 'manual settings save button should not exist');
     await page.screenshot({ path: path.join(outDir, 'electron-settings-modal.png') });
     await page.click('#cancelSettings');
 

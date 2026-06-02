@@ -192,7 +192,7 @@ async function sendAndCapture(engine, prompt, observed) {
   process.env.RUST_LOG = 'error';
 
   const settings = {
-    model: process.env.ADAPTER_MODEL || process.env.OPENAI_MODEL || process.env.GLM_MODEL || 'gpt-5.4-mini',
+    model: process.env.ADAPTER_MODEL || process.env.OPENAI_MODEL || process.env.GLM_MODEL || 'test-relay-model',
     apiKey,
     baseUrl,
     relayMode: process.env.RELAY_MODE || (process.env.OPENAI_BASE_URL ? 'openai' : 'glm'),

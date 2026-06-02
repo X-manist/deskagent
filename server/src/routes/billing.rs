@@ -36,19 +36,19 @@ async fn create_order(
     if !matches!(req.provider.as_str(), "manual" | "alipay" | "wechat") {
         return Err(AppError::bad("不支持的支付方式"));
     }
-    let pkg: Option<(String, String, i64, i64, i64)> = sqlx::query_as(
-        "SELECT name, model, total_tokens, price_cents, duration_days FROM packages WHERE id = ? AND active = 1",
+    let pkg: Option<(String, String, i64, f64, i64, i64)> = sqlx::query_as(
+        "SELECT name, model, total_tokens, token_multiplier, price_cents, duration_days FROM packages WHERE id = ? AND active = 1",
     )
     .bind(req.package_id)
     .fetch_optional(&st.db)
     .await?;
-    let (name, model, tokens, price, days) =
+    let (name, model, tokens, multiplier, price, days) =
         pkg.ok_or_else(|| AppError::bad("套餐不存在或已下架"))?;
 
     let out_trade_no = crate::crypto::out_trade_no();
     sqlx::query(
-        "INSERT INTO orders (out_trade_no, user_id, package_id, pkg_name, pkg_model, pkg_tokens, pkg_days, amount_cents, provider, status)
-         VALUES (?,?,?,?,?,?,?,?,?, 'pending_payment')",
+        "INSERT INTO orders (out_trade_no, user_id, package_id, pkg_name, pkg_model, pkg_tokens, pkg_token_multiplier, pkg_days, amount_cents, provider, status)
+         VALUES (?,?,?,?,?,?,?,?,?,?, 'pending_payment')",
     )
     .bind(&out_trade_no)
     .bind(user.0.sub)
@@ -56,6 +56,7 @@ async fn create_order(
     .bind(&name)
     .bind(&model)
     .bind(tokens)
+    .bind(multiplier)
     .bind(days)
     .bind(price)
     .bind(&req.provider)
@@ -101,22 +102,23 @@ pub async fn grant_order(
         return Ok(false); // already granted (or missing) — idempotent no-op
     }
 
-    let order: (i64, String, i64, i64) = sqlx::query_as(
-        "SELECT user_id, pkg_model, pkg_tokens, pkg_days FROM orders WHERE out_trade_no = ?",
+    let order: (i64, String, i64, f64, i64) = sqlx::query_as(
+        "SELECT user_id, pkg_model, pkg_tokens, pkg_token_multiplier, pkg_days FROM orders WHERE out_trade_no = ?",
     )
     .bind(out_trade_no)
     .fetch_one(&mut *tx)
     .await?;
-    let (user_id, model, tokens, days) = order;
+    let (user_id, model, tokens, multiplier, days) = order;
 
     sqlx::query(
-        "INSERT INTO entitlements (user_id, order_id, model, token_allowance, expires_at, status)
-         VALUES (?, (SELECT id FROM orders WHERE out_trade_no = ?), ?, ?, datetime('now', ?), 'active')",
+        "INSERT INTO entitlements (user_id, order_id, model, token_allowance, token_multiplier, expires_at, status)
+         VALUES (?, (SELECT id FROM orders WHERE out_trade_no = ?), ?, ?, ?, datetime('now', ?), 'active')",
     )
     .bind(user_id)
     .bind(out_trade_no)
     .bind(&model)
     .bind(tokens)
+    .bind(multiplier)
     .bind(format!("+{days} days"))
     .execute(&mut *tx)
     .await?;
@@ -127,7 +129,7 @@ pub async fn grant_order(
         &st.db,
         "system",
         "grant_order",
-        &format!("{out_trade_no} -> user {user_id} {model} {tokens}t/{days}d"),
+        &format!("{out_trade_no} -> user {user_id} {model} {tokens} points x{multiplier}/{days}d"),
     )
     .await;
     Ok(true)

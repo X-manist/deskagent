@@ -33,7 +33,7 @@
           <div class="logo">智</div>
           <div class="brand-copy">
             <div class="brand-name">智界助手</div>
-            <div class="brand-sub">Codex-rs 驱动的桌面助理</div>
+            <div class="brand-sub">本地智能引擎驱动</div>
           </div>
         </div>
 
@@ -135,17 +135,24 @@
     <div id="settingsModal" class="modal hidden">
       <div class="modal-card">
         <h2>设置</h2>
-        <label>中转站地址 (Base URL)</label>
-        <input id="setBaseUrl" type="text" placeholder="https://..." />
-        <label>密钥 / 会员令牌 (API Key)</label>
-        <input id="setApiKey" type="password" placeholder="sk-..." />
-        <label>模型</label>
-        <input id="setModel" type="text" placeholder="glm-4.6" />
-        <div class="modal-actions">
-          <button id="cancelSettings" class="ghost-btn">取消</button>
-          <button id="saveSettings" class="send-btn">保存并重启</button>
+        <div class="settings-list">
+          <div class="settings-row">
+            <span>模型与额度</span>
+            <strong>由会员套餐自动决定</strong>
+          </div>
+          <div class="settings-row">
+            <span>当前模型</span>
+            <strong id="settingsModel">登录后自动获取</strong>
+          </div>
+          <div class="settings-row">
+            <span>本地工作区</span>
+            <strong id="settingsWorkspace">默认工作区</strong>
+          </div>
         </div>
-        <p class="hint">提示：正式版会自动填入中转站地址与你的会员令牌，无需手动配置。</p>
+        <div class="modal-actions">
+          <button id="cancelSettings" class="send-btn">关闭</button>
+        </div>
+        <p class="hint">模型权限、积分数和余额由套餐控制；如需调整套餐，请进入会员页面或管理后台。</p>
       </div>
     </div>
 

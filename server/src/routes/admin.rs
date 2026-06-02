@@ -148,21 +148,26 @@ async fn list_packages(
     State(st): State<AppState>,
     _a: AuthAdmin,
 ) -> AppResult<Json<serde_json::Value>> {
-    let rows: Vec<(i64, String, String, i64, i64, i64, i64, i64)> = sqlx::query_as(
-        "SELECT id, name, model, total_tokens, price_cents, duration_days, active, sort_order
+    let rows: Vec<(i64, String, String, i64, f64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT id, name, model, total_tokens, token_multiplier, price_cents, duration_days, active, sort_order
          FROM packages ORDER BY sort_order ASC, id ASC",
     )
     .fetch_all(&st.db)
     .await?;
     let list: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(id, name, model, tokens, price, days, active, sort)| {
-            json!({
-                "id": id, "name": name, "model": model, "total_tokens": tokens,
-                "price_cents": price, "duration_days": days,
-                "active": active == 1, "sort_order": sort,
-            })
-        })
+        .map(
+            |(id, name, model, tokens, multiplier, price, days, active, sort)| {
+                json!({
+                    "id": id, "name": name, "model": model,
+                    "total_tokens": tokens, "points": tokens, "token_allowance": tokens,
+                    "token_multiplier": multiplier,
+                    "price_cents": price, "price_yuan": format!("{:.2}", price as f64 / 100.0),
+                    "duration_days": days,
+                    "active": active == 1, "sort_order": sort,
+                })
+            },
+        )
         .collect();
     Ok(Json(json!({ "packages": list })))
 }
@@ -172,6 +177,8 @@ struct PackageReq {
     name: String,
     model: String,
     total_tokens: i64,
+    #[serde(default = "default_multiplier")]
+    token_multiplier: f64,
     price_cents: i64,
     duration_days: i64,
     #[serde(default = "default_true")]
@@ -182,19 +189,46 @@ struct PackageReq {
 fn default_true() -> bool {
     true
 }
+fn default_multiplier() -> f64 {
+    1.0
+}
+
+fn validate_package(req: &PackageReq) -> AppResult<()> {
+    if req.name.trim().is_empty() {
+        return Err(AppError::bad("套餐名称不能为空"));
+    }
+    if req.model.trim().is_empty() {
+        return Err(AppError::bad("模型不能为空"));
+    }
+    if req.total_tokens <= 0 {
+        return Err(AppError::bad("套餐积分数必须大于 0"));
+    }
+    if req.price_cents < 0 {
+        return Err(AppError::bad("套餐价格不能为负数"));
+    }
+    if req.duration_days <= 0 {
+        return Err(AppError::bad("有效天数必须大于 0"));
+    }
+    if !req.token_multiplier.is_finite() || req.token_multiplier <= 0.0 {
+        return Err(AppError::bad("计费倍率必须大于 0"));
+    }
+    Ok(())
+}
 
 async fn create_package(
     State(st): State<AppState>,
     a: AuthAdmin,
     Json(req): Json<PackageReq>,
 ) -> AppResult<Json<serde_json::Value>> {
+    validate_package(&req)?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO packages (name, model, total_tokens, price_cents, duration_days, active, sort_order)
-         VALUES (?,?,?,?,?,?,?) RETURNING id",
+        "INSERT INTO packages (name, model, total_tokens, token_multiplier, price_cents, duration_days, active, sort_order)
+         VALUES (?,?,?,?,?,?,?,?) RETURNING id",
     )
-    .bind(&req.name)
-    .bind(&req.model)
+    .bind(req.name.trim())
+    .bind(req.model.trim())
     .bind(req.total_tokens)
+    .bind(req.token_multiplier)
     .bind(req.price_cents)
     .bind(req.duration_days)
     .bind(req.active as i64)
@@ -205,7 +239,10 @@ async fn create_package(
         &st.db,
         &a.0.username,
         "create_package",
-        &format!("#{id} {} {} {}t", req.name, req.model, req.total_tokens),
+        &format!(
+            "#{id} {} {} {} points x{}",
+            req.name, req.model, req.total_tokens, req.token_multiplier
+        ),
     )
     .await;
     Ok(Json(json!({ "ok": true, "id": id })))
@@ -217,12 +254,14 @@ async fn update_package(
     Path(id): Path<i64>,
     Json(req): Json<PackageReq>,
 ) -> AppResult<Json<serde_json::Value>> {
+    validate_package(&req)?;
     let res = sqlx::query(
-        "UPDATE packages SET name=?, model=?, total_tokens=?, price_cents=?, duration_days=?, active=?, sort_order=? WHERE id=?",
+        "UPDATE packages SET name=?, model=?, total_tokens=?, token_multiplier=?, price_cents=?, duration_days=?, active=?, sort_order=? WHERE id=?",
     )
-    .bind(&req.name)
-    .bind(&req.model)
+    .bind(req.name.trim())
+    .bind(req.model.trim())
     .bind(req.total_tokens)
+    .bind(req.token_multiplier)
     .bind(req.price_cents)
     .bind(req.duration_days)
     .bind(req.active as i64)
@@ -237,7 +276,10 @@ async fn update_package(
         &st.db,
         &a.0.username,
         "update_package",
-        &format!("#{id} {} {} {}t", req.name, req.model, req.total_tokens),
+        &format!(
+            "#{id} {} {} {} points x{}",
+            req.name, req.model, req.total_tokens, req.token_multiplier
+        ),
     )
     .await;
     Ok(Json(json!({ "ok": true })))

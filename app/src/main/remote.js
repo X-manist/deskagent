@@ -133,7 +133,7 @@ class RemoteHost extends EventEmitter {
       arch: os.arch(),
       release: os.release(),
       workspaceDir: this.opts.workspaceDir,
-      agentRuntime: 'codex-rs',
+      agentRuntime: 'deskagent-core',
     };
   }
 

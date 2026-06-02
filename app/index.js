@@ -21,7 +21,7 @@ const DEFAULT_SETTINGS = {
   // the relay base URL + the member's subscription token.
   baseUrl: process.env.OPENAI_BASE_URL || process.env.GLM_BASE_URL || 'https://llmapi.debinxiang.top/v1',
   apiKey: process.env.OPENAI_API_KEY || process.env.GLM_API_KEY || '',
-  model: process.env.ADAPTER_MODEL || process.env.OPENAI_MODEL || 'gpt-5.4-mini',
+  model: process.env.ADAPTER_MODEL || process.env.OPENAI_MODEL || process.env.GLM_MODEL || 'glm-5.1',
   relayMode: process.env.RELAY_MODE || 'openai',
   mcpProfile: process.env.DESKAGENT_MCP_PROFILE || 'core',
   memberToken: '',
@@ -116,7 +116,7 @@ async function prepareEngineSettings() {
     directRelayFallbackActive = true;
     sendToWindow('engine:status', {
       state: 'starting',
-      message: '本地会员服务未启动，开发模式直连中转站…',
+      message: '本地会员服务未启动，开发模式直连模型通道…',
     });
     return;
   }
@@ -348,21 +348,6 @@ ipcMain.handle('auth:logout', async () => {
     engine = null;
   }
   sendToWindow('auth:state', { loggedIn: false });
-  return { ok: true };
-});
-
-ipcMain.handle('app:saveSettings', async (_e, partial) => {
-  const cur = getSettings();
-  const next = { ...cur, ...partial };
-  if (partial.apiKey === '••••••••') next.apiKey = cur.apiKey; // unchanged masked value
-  settingsCache = next;
-  saveSettings(next);
-  // Restart engine to apply — but only when logged in, otherwise the engine
-  // stays stopped (we must never run it without a metered backend token).
-  if (isLoggedIn()) {
-    if (engine) await engine.stop();
-    await startEngine();
-  }
   return { ok: true };
 });
 

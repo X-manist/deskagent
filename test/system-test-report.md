@@ -167,7 +167,7 @@ Result: pass.
 Live configuration used:
 
 - relay base: `https://llmapi.debinxiang.top/v1`
-- model reported by runtime settings: `gpt-5.4`
+- model reported by runtime settings: `test-relay-model`
 
 Scenario:
 

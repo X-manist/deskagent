@@ -255,7 +255,7 @@ class Engine extends EventEmitter {
     this.upstreamBaseUrl = normalizeUpstreamBaseUrl(s.baseUrl);
 
     if (!String(s.apiKey || '').trim()) {
-      const msg = '尚未配置会员令牌（API Key）。请在设置中填写中转站会员令牌后重试。';
+      const msg = '当前账户授权不可用，请重新登录后重试。';
       this._fail(msg);
       throw new Error(msg);
     }

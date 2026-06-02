@@ -210,14 +210,12 @@ function resolveServerBinary() {
   const releaseBin = targetPlatform === process.platform && targetArch === process.arch
     ? path.resolve(root, '..', 'server', 'target', 'release', serverExe)
     : path.resolve(root, '..', 'server', 'target', triple || '', 'release', serverExe);
-  if (!fs.existsSync(releaseBin)) {
-    try {
-      const targetArg = targetPlatform === process.platform && targetArch === process.arch ? '' : ` --target ${triple}`;
-      if (!triple && targetPlatform !== process.platform) throw new Error(`unsupported target ${targetKey()}`);
-      execSync(`cargo build --release --manifest-path "${manifest}"${targetArg}`, { stdio: 'inherit' });
-    } catch (e) {
-      console.warn(`[prepare] WARNING: failed to build deskagent-server: ${e.message}`);
-    }
+  try {
+    const targetArg = targetPlatform === process.platform && targetArch === process.arch ? '' : ` --target ${triple}`;
+    if (!triple && targetPlatform !== process.platform) throw new Error(`unsupported target ${targetKey()}`);
+    execSync(`cargo build --release --manifest-path "${manifest}"${targetArg}`, { stdio: 'inherit' });
+  } catch (e) {
+    console.warn(`[prepare] WARNING: failed to build deskagent-server: ${e.message}`);
   }
   return fs.existsSync(releaseBin) ? releaseBin : '';
 }
