@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('assert');
+const { EventEmitter } = require('events');
 const { RemoteHost, decryptJson, encryptJson } = require('../app/src/main/remote');
 
 async function post(base, path, body) {
@@ -19,15 +20,40 @@ async function post(base, path, body) {
 
 async function main() {
   const sent = [];
-  const engine = {
+  const engine = new EventEmitter();
+  Object.assign(engine, {
+    threadId: 'thread-existing',
+    async listThreads() {
+      return [
+        { id: 'thread-existing', preview: '历史任务', createdAt: '2026-06-01T10:00:00Z', updatedAt: '2026-06-01T10:10:00Z', status: 'ready' },
+      ];
+    },
     async startNewThread() {
+      this.threadId = 'thread-remote';
       return { threadId: 'thread-remote' };
+    },
+    async resumeThread(threadId) {
+      this.threadId = threadId;
+      return {
+        threadId,
+        messages: [
+          { kind: 'message', role: 'user', text: '之前的问题' },
+          { kind: 'message', role: 'ai', text: '之前的回复' },
+          { kind: 'activity', activityKind: 'reasoning', text: '内部过程不应该给手机端历史' },
+        ],
+      };
     },
     async send(text, attachments, threadId) {
       sent.push({ text, attachments, threadId });
+      setTimeout(() => {
+        this.emit('delta', { threadId, itemId: 'msg_0', delta: '远程', text: '远程' });
+        this.emit('delta', { threadId, itemId: 'msg_0', delta: '回复', text: '远程回复' });
+        this.emit('message', { threadId, itemId: 'msg_0', text: '远程回复' });
+        this.emit('turnDone', { threadId, usage: { total_tokens: 12 } });
+      }, 10);
       return { threadId };
     },
-  };
+  });
 
   const host = new RemoteHost({
     baseDir: '/tmp/deskagent-remote-test',
@@ -67,6 +93,9 @@ async function main() {
     const pageHtml = await pageRes.text();
     assert(pageHtml.includes('/vendor/tweetnacl.min.js'));
     assert(pageHtml.includes('/api/remote/direct/command'));
+    assert(pageHtml.includes('/api/remote/direct/events'));
+    assert(pageHtml.includes('/api/remote/direct/sessions'));
+    assert(pageHtml.includes('新建会话'));
 
     const vendorRes = await fetch(`${base}/vendor/tweetnacl.min.js`);
     assert.strictEqual(vendorRes.status, 200);
@@ -80,14 +109,55 @@ async function main() {
     assert.strictEqual(helloPayload.t, 'hello');
     assert.strictEqual(helloPayload.message, '已直连这台电脑');
 
+    const sessions = await post(base, '/api/remote/direct/sessions', {
+      code,
+      msg: encryptJson(key, { t: 'list_sessions', at: Date.now() }),
+    });
+    const sessionsPayload = decryptJson(key, sessions.msg);
+    assert.strictEqual(sessionsPayload.t, 'sessions');
+    assert.strictEqual(sessionsPayload.current_thread_id, 'thread-existing');
+    assert.strictEqual(sessionsPayload.sessions[0].id, 'thread-existing');
+
+    const newSession = await post(base, '/api/remote/direct/new-session', {
+      code,
+      msg: encryptJson(key, { t: 'new_session', at: Date.now() }),
+    });
+    assert.strictEqual(decryptJson(key, newSession.msg).thread_id, 'thread-remote');
+
+    const history = await post(base, '/api/remote/direct/history', {
+      code,
+      msg: encryptJson(key, { t: 'history', thread_id: 'thread-existing', at: Date.now() }),
+    });
+    const historyPayload = decryptJson(key, history.msg);
+    assert.strictEqual(historyPayload.t, 'history');
+    assert.deepStrictEqual(historyPayload.messages, [
+      { role: 'user', text: '之前的问题' },
+      { role: 'assistant', text: '之前的回复' },
+    ]);
+
     const command = await post(base, '/api/remote/direct/command', {
       code,
       msg: encryptJson(key, { t: 'chat_message', text: '远程测试', at: Date.now() }),
     });
     const commandPayload = decryptJson(key, command.msg);
     assert.strictEqual(commandPayload.t, 'accepted');
+    assert.ok(commandPayload.turn_id);
     assert.strictEqual(commandPayload.thread_id, 'thread-remote');
     assert.deepStrictEqual(sent, [{ text: '远程测试', attachments: [], threadId: 'thread-remote' }]);
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const events = await post(base, '/api/remote/direct/events', {
+      code,
+      msg: encryptJson(key, { t: 'events', turn_id: commandPayload.turn_id, since_seq: 0, at: Date.now() }),
+    });
+    const eventsPayload = decryptJson(key, events.msg);
+    assert.strictEqual(eventsPayload.t, 'events');
+    assert.strictEqual(eventsPayload.thread_id, 'thread-remote');
+    assert.strictEqual(eventsPayload.done, true);
+    assert.ok(eventsPayload.events.some((e) => e.type === 'accepted'));
+    assert.ok(eventsPayload.events.some((e) => e.type === 'delta' && e.text === '远程回复'));
+    assert.ok(eventsPayload.events.some((e) => e.type === 'message' && e.text === '远程回复'));
+    assert.ok(eventsPayload.events.some((e) => e.type === 'done'));
 
     await assert.rejects(() => post(base, '/api/remote/direct/hello', {
       code,
@@ -113,7 +183,11 @@ async function main() {
         'remote_direct_pairing_qr',
         'remote_tweetnacl_vendor_page',
         'remote_encrypted_hello',
+        'remote_encrypted_sessions',
+        'remote_encrypted_new_session',
+        'remote_encrypted_history',
         'remote_encrypted_command_to_engine',
+        'remote_streaming_events_to_mobile',
         'remote_rejects_wrong_key',
         'remote_logged_out_no_server',
       ],
