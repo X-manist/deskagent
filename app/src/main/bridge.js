@@ -207,6 +207,8 @@ class LocalBridge {
 
   async openUrl({ url }) {
     if (!url) throw new Error('缺少 url');
+    const native = await this._runOsTool('open-url', { url, text: url });
+    if (native) return { ...native, ok: true, url };
     await shell.openExternal(url);
     return { ok: true, url };
   }

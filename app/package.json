@@ -8,6 +8,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "imapflow": "^1.0.191",
+    "katex": "^0.17.0",
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.5",
     "qrcode": "^1.5.4",

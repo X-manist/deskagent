@@ -228,6 +228,11 @@ class Engine extends EventEmitter {
       GIT_CONFIG_GLOBAL: path.join(runtimeDir, 'gitconfig'),
       GIT_TERMINAL_PROMPT: '0',
     };
+    const bundledPathDir = this._bundledRuntimePathDir();
+    if (bundledPathDir) {
+      const sep = process.platform === 'win32' ? ';' : ':';
+      extra.PATH = [bundledPathDir, env.PATH].filter(Boolean).join(sep);
+    }
     if (httpProxy) {
       extra.HTTP_PROXY = httpProxy;
       extra.HTTPS_PROXY = httpProxy;
@@ -235,6 +240,12 @@ class Engine extends EventEmitter {
       extra.https_proxy = httpProxy;
     }
     return { ...env, ...extra };
+  }
+
+  _bundledRuntimePathDir() {
+    if (!process.resourcesPath) return '';
+    const dir = path.join(process.resourcesPath, 'codex-path');
+    return fs.existsSync(dir) ? dir : '';
   }
 
   async start() {
@@ -828,14 +839,40 @@ class Engine extends EventEmitter {
   }
 
   async stop() {
-    try {
-      if (this.proc) this.proc.kill();
-    } catch (_) {}
-    try {
-      if (this.adapterServer) this.adapterServer.close();
-    } catch (_) {}
+    const proc = this.proc;
+    const adapterServer = this.adapterServer;
     this.proc = null;
     this.rpc = null;
+    this.adapterServer = null;
+    if (proc && !proc.killed) {
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(finish, 1500);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+        proc.once('exit', finish);
+        proc.once('error', finish);
+        try {
+          proc.kill();
+        } catch (_) {
+          finish();
+        }
+      });
+    }
+    if (adapterServer && adapterServer.listening) {
+      await new Promise((resolve) => {
+        try {
+          adapterServer.close(() => resolve());
+        } catch (_) {
+          resolve();
+        }
+      });
+    }
   }
 }
 

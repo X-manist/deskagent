@@ -6,6 +6,7 @@ const { loadEnvFiles, defaultEnvCandidates } = require('./env');
 const { Engine } = require('./engine');
 const { LocalBridge } = require('./bridge');
 const { RemoteHost } = require('./remote');
+const { downloadUrlAttachment } = require('./attachments');
 
 loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 
@@ -390,6 +391,11 @@ ipcMain.handle('app:pickAttachments', async (_e, kind) => {
   if (result.canceled) return { canceled: true, items: [] };
   const items = result.filePaths.map((p) => ({ kind, path: p, name: path.basename(p) }));
   return { canceled: false, items };
+});
+
+ipcMain.handle('app:downloadAttachment', async (_e, url) => {
+  const item = await downloadUrlAttachment(url, { workspaceDir: paths.workspaceDir });
+  return { canceled: false, items: [item] };
 });
 
 ipcMain.handle('chat:interrupt', async (_e, threadId) => {

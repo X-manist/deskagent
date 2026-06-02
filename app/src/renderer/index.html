@@ -23,6 +23,7 @@
         document.documentElement.dataset.theme = mode === 'auto' ? autoTheme() : mode;
       })();
     </script>
+    <link rel="stylesheet" href="vendor/katex/katex.min.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -112,6 +113,7 @@
                   <button data-attach="image">上传图片</button>
                   <button data-attach="file">上传文件</button>
                   <button data-attach="directory">上传目录</button>
+                  <button data-attach="url">URL 附件</button>
                 </div>
               </div>
               <div class="composer-actions">
@@ -138,6 +140,20 @@
           <button id="saveSettings" class="send-btn">保存并重启</button>
         </div>
         <p class="hint">提示：正式版会自动填入中转站地址与你的会员令牌，无需手动配置。</p>
+      </div>
+    </div>
+
+    <div id="urlModal" class="modal hidden">
+      <div class="modal-card url-card">
+        <h2>添加 URL 附件</h2>
+        <label>附件链接</label>
+        <input id="urlInput" type="url" placeholder="https://example.com/report.pdf" />
+        <div id="urlErr" class="login-err"></div>
+        <div class="modal-actions">
+          <button id="cancelUrl" class="ghost-btn">取消</button>
+          <button id="downloadUrl" class="send-btn">下载并添加</button>
+        </div>
+        <p class="hint">文件会先下载到工作区，再作为附件随消息提交。</p>
       </div>
     </div>
 
@@ -171,6 +187,7 @@
       </div>
     </div>
 
+    <script src="vendor/katex/katex.min.js"></script>
     <script src="rich-renderer.js"></script>
     <script src="renderer.js"></script>
   </body>

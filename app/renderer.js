@@ -20,6 +20,11 @@ const remoteMetaEl = $('#remoteMeta');
 const remoteQrEl = $('#remoteQr');
 const refreshRemoteBtn = $('#refreshRemote');
 const copyRemoteBtn = $('#copyRemote');
+const urlModal = $('#urlModal');
+const urlInput = $('#urlInput');
+const urlErr = $('#urlErr');
+const cancelUrlBtn = $('#cancelUrl');
+const downloadUrlBtn = $('#downloadUrl');
 
 let attachments = [];
 const THEME_STORAGE_KEY = 'deskagent.themeMode';
@@ -40,6 +45,7 @@ let sessionsLoaded = false;
 let preparingSend = false;
 let activeConversationPromise = null;
 let remoteState = null;
+let urlDownloading = false;
 
 function autoThemeForNow() {
   const hour = new Date().getHours();
@@ -410,6 +416,47 @@ function inferKind(name) {
   return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name || '') ? 'image' : 'file';
 }
 
+function setUrlDownloading(value) {
+  urlDownloading = value;
+  if (downloadUrlBtn) {
+    downloadUrlBtn.disabled = value;
+    downloadUrlBtn.textContent = value ? '下载中…' : '下载并添加';
+  }
+}
+
+function openUrlAttachmentModal() {
+  if (!urlModal) return;
+  urlInput.value = '';
+  urlErr.textContent = '';
+  setUrlDownloading(false);
+  urlModal.classList.remove('hidden');
+  setTimeout(() => urlInput.focus(), 0);
+}
+
+function closeUrlAttachmentModal() {
+  if (!urlModal || urlDownloading) return;
+  urlModal.classList.add('hidden');
+  urlErr.textContent = '';
+}
+
+async function downloadUrlAttachment() {
+  if (urlDownloading) return;
+  const value = String(urlInput.value || '').trim();
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('仅支持 http 或 https 链接');
+    urlErr.textContent = '';
+    setUrlDownloading(true);
+    const res = await window.api.downloadAttachment(parsed.toString());
+    if (res && !res.canceled) addAttachments(res.items);
+    urlModal.classList.add('hidden');
+  } catch (e) {
+    urlErr.textContent = (e && e.message) || 'URL 附件添加失败';
+  } finally {
+    setUrlDownloading(false);
+  }
+}
+
 async function doSend() {
   const text = inputEl.value.trim();
   if ((!text && !attachments.length) || !engineReady || preparingSend) return;
@@ -514,12 +561,34 @@ attachMenu.addEventListener('click', (e) => e.stopPropagation());
 attachMenu.querySelectorAll('button[data-attach]').forEach((b) => {
   b.addEventListener('click', async () => {
     attachMenu.classList.add('hidden');
+    if (b.dataset.attach === 'url') {
+      openUrlAttachmentModal();
+      return;
+    }
     try {
       const res = await window.api.pickAttachments(b.dataset.attach);
       if (res && !res.canceled) addAttachments(res.items);
     } catch (_) {}
   });
 });
+
+if (cancelUrlBtn) cancelUrlBtn.addEventListener('click', closeUrlAttachmentModal);
+if (downloadUrlBtn) downloadUrlBtn.addEventListener('click', downloadUrlAttachment);
+if (urlInput) {
+  urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      downloadUrlAttachment();
+    } else if (e.key === 'Escape') {
+      closeUrlAttachmentModal();
+    }
+  });
+}
+if (urlModal) {
+  urlModal.addEventListener('click', (e) => {
+    if (e.target === urlModal) closeUrlAttachmentModal();
+  });
+}
 
 // Attachments: drag & drop files/directories onto the window
 window.addEventListener('dragover', (e) => {

@@ -845,28 +845,70 @@ button {
   font-weight: 700;
 }
 
-.rich .math-block,
-.rich .math-inline {
+.rich .math-shell {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  margin: 12px 0;
+  padding: 10px 10px 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--paper-soft);
-  font-family: "Times New Roman", "STSong", serif;
 }
 
 .rich .math-block {
   overflow-x: auto;
-  padding: 10px 12px;
+  min-width: 0;
+  padding: 2px 0;
   color: var(--accent-strong);
   font-size: 15px;
   line-height: 1.7;
   text-align: center;
-  white-space: pre-wrap;
+}
+
+.rich .math-inline-wrap {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  vertical-align: baseline;
 }
 
 .rich .math-inline {
-  display: inline-block;
-  padding: 0 5px;
+  display: inline-flex;
+  max-width: min(100%, 520px);
+  overflow-x: auto;
+  padding: 0 3px;
   color: var(--accent-strong);
+}
+
+.rich .math-copy {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--paper);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.rich .math-copy:hover,
+.rich .math-copy:focus-visible,
+.rich .math-copy.copied {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  outline: none;
+}
+
+.rich .math-fallback {
+  font-family: "Times New Roman", "STSong", serif;
+  white-space: pre-wrap;
 }
 
 .rich .media-card {
@@ -1035,7 +1077,7 @@ button {
   left: 0;
   z-index: 20;
   display: flex;
-  min-width: 132px;
+  min-width: 144px;
   padding: 6px;
   flex-direction: column;
   gap: 4px;
@@ -1191,6 +1233,10 @@ button {
   line-height: 1.3;
 }
 
+.url-card {
+  width: 500px;
+}
+
 .modal-card label {
   display: block;
   margin: 12px 0 5px;
@@ -1220,6 +1266,10 @@ button {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
+}
+
+.modal-actions .send-btn:disabled {
+  opacity: 0.58;
 }
 
 .hint {

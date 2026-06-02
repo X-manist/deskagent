@@ -5,6 +5,8 @@ const fs = require('fs');
 const { loadEnvFiles, defaultEnvCandidates } = require('./env');
 const { Engine } = require('./engine');
 const { LocalBridge } = require('./bridge');
+const { RemoteHost } = require('./remote');
+const { downloadUrlAttachment } = require('./attachments');
 
 loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 
@@ -39,6 +41,7 @@ let win = null;
 let engine = null;
 let paths = null;
 let bridge = null;
+let remoteHost = null;
 let auth = { token: '', phone: '' };
 let directRelayFallbackActive = false;
 
@@ -145,6 +148,27 @@ function canSendToWindow() {
 
 function sendToWindow(channel, payload) {
   if (canSendToWindow()) win.webContents.send(channel, payload);
+}
+
+function wireRemoteEvents() {
+  if (!remoteHost) return;
+  remoteHost.on('state', (payload) => sendToWindow('remote:state', payload));
+}
+
+async function startRemoteHost() {
+  if (!remoteHost || !isLoggedIn()) return;
+  try {
+    await remoteHost.start();
+  } catch (e) {
+    sendToWindow('remote:state', {
+      ...(remoteHost ? remoteHost.info() : {}),
+      lastError: (e && e.message) || String(e),
+    });
+  }
+}
+
+async function stopRemoteHost() {
+  if (remoteHost) await remoteHost.stop();
 }
 
 function setupPaths() {
@@ -273,6 +297,7 @@ ipcMain.handle('app:bootstrap', async () => {
     paths: { workspaceDir: paths.workspaceDir },
     currentThreadId: engine && engine.threadId,
     auth: { loggedIn: isLoggedIn(), phone: auth.phone },
+    remote: remoteHost ? remoteHost.info() : null,
   };
 });
 
@@ -290,6 +315,7 @@ ipcMain.handle('auth:verifySms', async (_e, { phone, code }) => {
   // Unblock the login UI immediately; the engine is started in the background so
   // a slow or failing runtime spawn can never make a successful login look stuck.
   sendToWindow('auth:state', { loggedIn: true, phone });
+  startRemoteHost();
   (async () => {
     try {
       if (engine) await engine.stop();
@@ -316,6 +342,7 @@ ipcMain.handle('auth:confirmOrder', async (_e, outTradeNo) => {
 ipcMain.handle('auth:logout', async () => {
   auth = { token: '', phone: '' };
   saveAuth();
+  await stopRemoteHost();
   if (engine) {
     await engine.stop();
     engine = null;
@@ -366,6 +393,11 @@ ipcMain.handle('app:pickAttachments', async (_e, kind) => {
   return { canceled: false, items };
 });
 
+ipcMain.handle('app:downloadAttachment', async (_e, url) => {
+  const item = await downloadUrlAttachment(url, { workspaceDir: paths.workspaceDir });
+  return { canceled: false, items: [item] };
+});
+
 ipcMain.handle('chat:interrupt', async (_e, threadId) => {
   if (engine) await engine.interrupt(threadId);
   return { ok: true };
@@ -394,6 +426,15 @@ ipcMain.handle('app:openWorkspace', async () => {
   return { ok: true };
 });
 
+ipcMain.handle('remote:status', async () => (remoteHost ? remoteHost.info() : null));
+
+ipcMain.handle('remote:refreshPairing', async () => {
+  if (!remoteHost) throw new Error('远程连接服务未初始化');
+  if (!isLoggedIn()) throw new Error('请先登录后再开启远程连接');
+  if (!remoteHost.running) await startRemoteHost();
+  return remoteHost.refreshPairing();
+});
+
 app.whenReady().then(async () => {
   paths = setupPaths();
   installBundledAgentConfig();
@@ -408,11 +449,21 @@ app.whenReady().then(async () => {
     mcpEnv: { ELECTRON_RUN_AS_NODE: '1' },
   });
   await bridge.start();
+  remoteHost = new RemoteHost({
+    baseDir: paths.base,
+    workspaceDir: paths.workspaceDir,
+    backendUrl: BACKEND_URL,
+    appVersion: app.getVersion ? app.getVersion() : '0.1.0',
+    auth: () => auth,
+    engine: () => engine,
+  });
+  wireRemoteEvents();
   createWindow();
   win.webContents.once('did-finish-load', () => {
     loadAuth();
     if (isLoggedIn()) {
       sendToWindow('auth:state', { loggedIn: true, phone: auth.phone });
+      startRemoteHost();
       startEngine();
     } else {
       sendToWindow('auth:state', { loggedIn: false });
@@ -425,6 +476,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', async () => {
   if (engine) await engine.stop();
+  if (remoteHost) await remoteHost.stop();
   if (bridge) await bridge.stop();
 });
 
@@ -434,5 +486,6 @@ app.on('window-all-closed', () => {
 
 app.on('window-all-closed', async () => {
   if (engine) await engine.stop();
+  if (remoteHost) await remoteHost.stop();
   if (process.platform !== 'darwin') app.quit();
 });

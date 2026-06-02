@@ -45,6 +45,56 @@ function execFileAsync(command, args, options = {}) {
   });
 }
 
+function spawnJsonAsync(command, args, body, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...options,
+    });
+    let stdout = '';
+    let stderr = '';
+    const maxBuffer = options.maxBuffer || 8 * 1024 * 1024;
+    const timeoutMs = options.timeoutMs || 30000;
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      const error = new Error(`native OS tool timed out after ${timeoutMs}ms`);
+      error.stdout = stdout;
+      error.stderr = stderr;
+      reject(error);
+    }, timeoutMs);
+    const append = (target, chunk) => {
+      const next = target + chunk.toString();
+      if (next.length > maxBuffer) {
+        child.kill('SIGKILL');
+        throw new Error('native OS tool output exceeded buffer limit');
+      }
+      return next;
+    };
+    child.stdout.on('data', (chunk) => {
+      try { stdout = append(stdout, chunk); } catch (error) { reject(error); }
+    });
+    child.stderr.on('data', (chunk) => {
+      try { stderr = append(stderr, chunk); } catch (error) { reject(error); }
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      error.stdout = stdout;
+      error.stderr = stderr;
+      reject(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve({ stdout, stderr });
+      const error = new Error(stderr.trim() || `native OS tool exited with ${code}`);
+      error.stdout = stdout;
+      error.stderr = stderr;
+      error.code = code;
+      reject(error);
+    });
+    child.stdin.end(body || '');
+  });
+}
+
 function hasCommand(command) {
   return new Promise((resolve) => {
     const child = spawn(process.platform === 'win32' ? 'where' : 'sh', process.platform === 'win32' ? [command] : ['-lc', `command -v ${command}`]);
@@ -67,6 +117,10 @@ function clipText(text, max = 180) {
   return s.length > max ? `${s.slice(0, max)}...` : s;
 }
 
+function osToolsExeName() {
+  return process.platform === 'win32' ? 'deskagent-os-tools.exe' : 'deskagent-os-tools';
+}
+
 function parseEmailList(value) {
   if (!value) return undefined;
   if (Array.isArray(value)) return value.filter(Boolean);
@@ -75,7 +129,10 @@ function parseEmailList(value) {
 
 class LocalBridge {
   constructor(opts) {
-    this.opts = opts;
+    this.opts = {
+      ...opts,
+      workspaceDir: opts.workspaceDir || path.join(opts.baseDir, 'workspace'),
+    };
     this.server = null;
     this.port = null;
     this.token = crypto.randomBytes(24).toString('hex');
@@ -83,6 +140,7 @@ class LocalBridge {
     this.tasks = new Map();
     this.jobs = new Map();
     this.running = new Set();
+    this.osToolsCommand = null;
   }
 
   async start() {
@@ -149,16 +207,80 @@ class LocalBridge {
 
   async openUrl({ url }) {
     if (!url) throw new Error('缺少 url');
+    const native = await this._runOsTool('open-url', { url, text: url });
+    if (native) return { ...native, ok: true, url };
     await shell.openExternal(url);
     return { ok: true, url };
   }
 
   async openApp({ name }) {
     if (!name) throw new Error('缺少应用名称');
+    const native = await this._runOsTool('open-app', { app: name, name });
+    if (native) return { ...native, ok: true, name };
     if (process.platform === 'darwin') spawnDetached('open', ['-a', name]);
     else if (process.platform === 'win32') spawnDetached('cmd', ['/c', 'start', '', name]);
     else spawnDetached('xdg-open', [name]);
     return { ok: true, name };
+  }
+
+  _resolveOsToolsCommand() {
+    if (this.osToolsCommand !== null) return this.osToolsCommand;
+    const exe = osToolsExeName();
+    const repoRoot = path.resolve(__dirname, '..', '..', '..');
+    const candidates = [
+      this.opts.osToolsCommand,
+      process.env.DESKAGENT_OS_TOOLS_BIN,
+      process.resourcesPath ? path.join(process.resourcesPath, 'bin', exe) : '',
+      path.join(repoRoot, 'native', 'os-tools', 'target', 'release', exe),
+      path.join(repoRoot, 'native', 'os-tools', 'target', 'debug', exe),
+      path.join(repoRoot, 'app', 'resources', 'bin', exe),
+    ].filter(Boolean);
+    this.osToolsCommand = candidates.find((candidate) => {
+      try {
+        return fs.existsSync(candidate) && fs.statSync(candidate).isFile();
+      } catch (_) {
+        return false;
+      }
+    }) || '';
+    return this.osToolsCommand;
+  }
+
+  async _runOsTool(command, payload = {}, options = {}) {
+    const osToolsCommand = this._resolveOsToolsCommand();
+    if (!osToolsCommand) return null;
+    const request = {
+      ...payload,
+      workspaceRoot: this.opts.workspaceDir,
+    };
+    try {
+      const { stdout } = await spawnJsonAsync(osToolsCommand, [command], JSON.stringify(request));
+      const text = stdout.trim();
+      if (!text) return { ok: true, backend: 'rust-os-tools', command };
+      return JSON.parse(text);
+    } catch (error) {
+      const detail = (error.stderr || error.stdout || error.message || '').trim();
+      if (options.screenCapture) {
+        const message = await this._showScreenCapturePrompt(detail);
+        throw new Error(message);
+      }
+      if (options.permissionFeature && /not allowed|assistive|accessibility|permission|denied|not authorized|1002/i.test(detail)) {
+        const message = await this._showPermissionPrompt(options.permissionFeature, detail);
+        throw new Error(message);
+      }
+      throw new Error(detail || error.message || 'native OS tool failed');
+    }
+  }
+
+  _actionNeedsDesktopPermission(action) {
+    return [
+      'activate-app',
+      'type-text',
+      'shortcut',
+      'click',
+      'double-click',
+      'move-mouse',
+      'scroll',
+    ].includes(action);
   }
 
   _permissionMessage(feature) {
@@ -372,14 +494,47 @@ class LocalBridge {
     await this._powershell(script);
   }
 
-  async desktopAction({ action, app, text, shortcut, x, y, button = 'left', amount = 5 }) {
+  _dryRunFallback(action, details = {}) {
+    return {
+      ok: true,
+      backend: 'node-fallback',
+      platform: process.platform,
+      action,
+      message: 'dry-run: no OS side effect executed',
+      details,
+    };
+  }
+
+  async desktopAction({ action, app, text, shortcut, x, y, button = 'left', amount = 5, dryRun = false }) {
     if (!action) throw new Error('缺少 action');
-    if (action === 'open-app') return this.openApp({ name: app });
-    if (action === 'open-url') return this.openUrl({ url: text });
-    if (action === 'screenshot') return this.takeScreenshot({});
+    if (action === 'probe') {
+      const native = await this._runOsTool('probe', { dryRun: true });
+      return native || { ok: true, backend: 'node-fallback', platform: process.platform, action: 'probe' };
+    }
+    if (action === 'open-app' && !dryRun) return this.openApp({ name: app });
+    if (action === 'open-url' && !dryRun) return this.openUrl({ url: text });
+    if (action === 'screenshot') return this.takeScreenshot({ dryRun });
+
+    if (!dryRun && this._actionNeedsDesktopPermission(action)) {
+      await this._ensureDesktopPermission('电脑控制');
+    }
+    const native = await this._runOsTool('action', { action, app, text, shortcut, x, y, button, amount, dryRun }, {
+      permissionFeature: this._actionNeedsDesktopPermission(action) ? '电脑控制' : '',
+    });
+    if (native) return native;
+    if (dryRun) {
+      return this._dryRunFallback(action, {
+        app,
+        textChars: text ? String(text).length : 0,
+        shortcut,
+        x: Number(x) || 0,
+        y: Number(y) || 0,
+        button,
+        amount: Number(amount) || 0,
+      });
+    }
 
     if (process.platform === 'darwin') {
-      await this._ensureDesktopPermission('电脑控制');
       if (action === 'activate-app') {
         await this._osascript([`tell application "${app}" to activate`]);
         return { ok: true, action, app };
@@ -491,7 +646,7 @@ class LocalBridge {
     throw new Error(`当前平台暂不支持动作: ${action}`);
   }
 
-  async takeScreenshot({ outputPath } = {}) {
+  async takeScreenshot({ outputPath, dryRun = false } = {}) {
     const shotsDir = path.join(this.opts.workspaceDir, 'screenshots');
     fs.mkdirSync(shotsDir, { recursive: true });
     const workspaceRoot = path.resolve(this.opts.workspaceDir);
@@ -501,6 +656,9 @@ class LocalBridge {
     if (file !== workspaceRoot && !file.startsWith(workspaceRoot + path.sep)) {
       throw new Error('截图只能保存到工作目录内');
     }
+    const native = await this._runOsTool('screenshot', { outputPath: file, dryRun }, { screenCapture: true });
+    if (native) return { ...native, ok: true, path: native.path || file };
+    if (dryRun) return this._dryRunFallback('screenshot', { path: file });
     fs.mkdirSync(path.dirname(file), { recursive: true });
     if (process.platform === 'darwin') {
       try {

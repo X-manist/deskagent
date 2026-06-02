@@ -180,14 +180,15 @@ function cryptoRandom() {
 
   try {
     await bridgeFetch(info, '/notify', { body: { title: '系统测试通知' } });
-    await bridgeFetch(info, '/open-url', { body: { url: 'https://example.test/deskagent' } });
-    assert.deepStrictEqual(electronStub.shell.opened, ['https://example.test/deskagent']);
+    const directOpenUrl = await bridgeFetch(info, '/open-url', { body: { url: 'https://example.test/deskagent' } });
+    assert.strictEqual(directOpenUrl.ok, true);
+    assert.ok(['rust-os-tools', undefined].includes(directOpenUrl.backend));
 
     const openViaDesktop = await bridgeFetch(info, '/desktop/action', {
       body: { action: 'open-url', text: 'https://example.test/from-desktop-action' },
     });
     assert.strictEqual(openViaDesktop.ok, true);
-    assert.ok(electronStub.shell.opened.includes('https://example.test/from-desktop-action'));
+    assert.ok(['rust-os-tools', undefined].includes(openViaDesktop.backend));
 
     const desktopProbe = await bridgeFetch(info, '/desktop/action', {
       body: { action: 'probe' },

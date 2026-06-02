@@ -56,6 +56,7 @@ function findDesktopActionToolName(body) {
 }
 
 (async () => {
+  let exitCode = 0;
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deskagent-os-model-e2e-'));
   const agentHome = path.join(baseDir, 'agent');
   const workspaceDir = path.join(baseDir, 'workspace');
@@ -204,8 +205,10 @@ function findDesktopActionToolName(body) {
   } finally {
     await engine.stop();
     await bridge.stop();
-    upstream.close();
+    await new Promise((resolve) => upstream.close(resolve));
     fs.rmSync(baseDir, { recursive: true, force: true });
+    process.exitCode = exitCode;
+    setImmediate(() => process.exit(process.exitCode));
   }
 })().catch((error) => {
   console.error('TEST ERROR', error);

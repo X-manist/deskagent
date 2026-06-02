@@ -9,6 +9,87 @@
     return '';
   }
 
+  async function copyText(text, button) {
+    const oldText = button ? button.textContent : '';
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        try {
+          textarea.select();
+          if (!document.execCommand || !document.execCommand('copy')) throw new Error('copy failed');
+        } finally {
+          textarea.remove();
+        }
+      }
+      if (button) {
+        button.textContent = '已复制';
+        button.classList.add('copied');
+        setTimeout(() => {
+          button.textContent = oldText;
+          button.classList.remove('copied');
+        }, 1200);
+      }
+    } catch (_) {
+      if (button) {
+        button.textContent = '复制失败';
+        setTimeout(() => {
+          button.textContent = oldText;
+        }, 1200);
+      }
+    }
+  }
+
+  function renderKatex(target, latex, displayMode) {
+    const value = String(latex || '').trim();
+    target.dataset.latex = value;
+    target.textContent = '';
+    if (window.katex && typeof window.katex.render === 'function') {
+      try {
+        window.katex.render(value, target, {
+          displayMode,
+          throwOnError: false,
+          strict: 'ignore',
+          trust: false,
+        });
+        return;
+      } catch (_) {}
+    }
+    target.classList.add('math-fallback');
+    target.textContent = value;
+  }
+
+  function makeMathNode(latex, displayMode) {
+    const wrapper = document.createElement(displayMode ? 'div' : 'span');
+    wrapper.className = displayMode ? 'math-shell' : 'math-inline-wrap';
+
+    const math = document.createElement(displayMode ? 'div' : 'span');
+    math.className = displayMode ? 'math-block' : 'math-inline';
+    renderKatex(math, latex, displayMode);
+
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'math-copy';
+    copy.title = '复制 LaTeX';
+    copy.setAttribute('aria-label', '复制 LaTeX');
+    copy.textContent = '复制';
+    copy.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyText(math.dataset.latex || latex, copy);
+    });
+
+    wrapper.appendChild(math);
+    wrapper.appendChild(copy);
+    return wrapper;
+  }
+
   function appendInline(parent, text) {
     const source = String(text || '');
     const pattern = /(!?\[([^\]]*)\]\(([^)]+)\))|(`([^`]+)`)|(\*\*([^*]+)\*\*)|(\$([^$\n]+)\$)|(\*([^*\n]+)\*)/g;
@@ -39,10 +120,7 @@
         strong.textContent = match[7];
         parent.appendChild(strong);
       } else if (match[8]) {
-        const math = document.createElement('span');
-        math.className = 'math-inline';
-        math.textContent = match[9];
-        parent.appendChild(math);
+        parent.appendChild(makeMathNode(match[9], false));
       } else if (match[10]) {
         const em = document.createElement('em');
         em.textContent = match[11];
@@ -201,10 +279,7 @@
 
       if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 4) {
         appendParagraph(root, state);
-        const math = document.createElement('div');
-        math.className = 'math-block';
-        math.textContent = trimmed.slice(2, -2).trim();
-        root.appendChild(math);
+        root.appendChild(makeMathNode(trimmed.slice(2, -2), true));
         i += 1;
         continue;
       }
@@ -219,10 +294,7 @@
           i += 1;
         }
         if (i < lines.length) i += 1;
-        const math = document.createElement('div');
-        math.className = 'math-block';
-        math.textContent = mathLines.join('\n').trim();
-        root.appendChild(math);
+        root.appendChild(makeMathNode(mathLines.join('\n'), true));
         continue;
       }
 

@@ -205,10 +205,15 @@ fn type_text(request: ToolRequest) -> Result<ToolResponse, String> {
     }
     #[cfg(target_os = "macos")]
     run_osascript(&[
-        "set oldClip to the clipboard".to_string(),
+        "try".to_string(),
+        "  set oldClip to the clipboard as text".to_string(),
+        "on error".to_string(),
+        "  set oldClip to \"\"".to_string(),
+        "end try".to_string(),
         format!("set the clipboard to {}", apple_string(&text)),
+        "delay 0.08".to_string(),
         "tell application \"System Events\" to keystroke \"v\" using command down".to_string(),
-        "delay 0.1".to_string(),
+        "delay 0.25".to_string(),
         "set the clipboard to oldClip".to_string(),
     ])?;
     #[cfg(target_os = "windows")]
@@ -299,13 +304,7 @@ fn scroll(request: ToolRequest) -> Result<ToolResponse, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let direction = if amount < 0.0 { "down" } else { "up" };
-        let count = amount.abs().clamp(1.0, 30.0).round();
-        run_osascript(&[
-            "tell application \"System Events\"".to_string(),
-            format!("  scroll {direction} {}", count as i64),
-            "end tell".to_string(),
-        ])?;
+        run_jxa(&mac_scroll_script(amount))?;
     }
     #[cfg(target_os = "windows")]
     {
@@ -514,6 +513,18 @@ fn mac_mouse_script(x: f64, y: f64, button: &str, repeat: u8) -> String {
     }
     lines.push("'OK';".to_string());
     lines.join("\n")
+}
+
+#[cfg(target_os = "macos")]
+fn mac_scroll_script(amount: f64) -> String {
+    let lines = amount.clamp(-30.0, 30.0).round() as i64;
+    [
+        "ObjC.import('CoreGraphics');".to_string(),
+        format!("var event = $.CGEventCreateScrollWheelEvent($(), 1, 1, {});", lines),
+        "$.CGEventPost(0, event);".to_string(),
+        "'OK';".to_string(),
+    ]
+    .join("\n")
 }
 
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
