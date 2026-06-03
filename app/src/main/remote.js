@@ -143,12 +143,26 @@ function decryptJson(key, envelope) {
   return JSON.parse(Buffer.from(plaintext).toString('utf8'));
 }
 
+function stripThinkText(value) {
+  let text = String(value || '');
+  text = text.replace(/```(?:think|thinking)[^\n]*\n[\s\S]*?(?:\n```\s*|$)/gi, '');
+  text = text.replace(/<think(?:ing)?\b[^>]*>[\s\S]*?(?:<\/think(?:ing)?>|$)/gi, '');
+  text = text.replace(/<\/think(?:ing)?>/gi, '');
+  text = text.replace(/&lt;think(?:ing)?\b[^&]*?&gt;[\s\S]*?(?:&lt;\/think(?:ing)?&gt;|$)/gi, '');
+  text = text.replace(/&lt;\/think(?:ing)?&gt;/gi, '');
+  return text;
+}
+
 function remoteVisibleMessages(messages) {
   return (messages || [])
-    .filter((item) => item && item.kind === 'message' && String(item.text || '').trim())
     .map((item) => ({
+      item,
+      text: stripThinkText(item && item.text),
+    }))
+    .filter(({ item, text }) => item && item.kind === 'message' && String(text || '').trim())
+    .map(({ item, text }) => ({
       role: item.role === 'ai' || item.role === 'assistant' ? 'assistant' : 'user',
-      text: String(item.text || ''),
+      text,
     }));
 }
 
@@ -282,6 +296,16 @@ function remotePageHtml() {
       messagesEl.appendChild(el);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
+    function stripThinkText(value) {
+      let text = String(value || '');
+      const fence = String.fromCharCode(96, 96, 96);
+      text = text.replace(new RegExp(fence + '(?:think|thinking)[^\\n]*\\n[\\s\\S]*?(?:\\n' + fence + '\\s*|$)', 'gi'), '');
+      text = text.replace(/<think(?:ing)?\b[^>]*>[\s\S]*?(?:<\/think(?:ing)?>|$)/gi, '');
+      text = text.replace(/<\/think(?:ing)?>/gi, '');
+      text = text.replace(/&lt;think(?:ing)?\b[^&]*?&gt;[\s\S]*?(?:&lt;\/think(?:ing)?&gt;|$)/gi, '');
+      text = text.replace(/&lt;\/think(?:ing)?&gt;/gi, '');
+      return text;
+    }
     async function api(path, body) {
       const res = await fetch(path, { method:'POST', headers:{ 'content-type':'application/json' }, body: JSON.stringify(body) });
       const data = await res.json().catch(() => ({}));
@@ -346,7 +370,8 @@ function remotePageHtml() {
     function renderHistory(messages) {
       messagesEl.innerHTML = '';
       for (const message of messages || []) {
-        add(message.text || '', message.role === 'assistant' ? 'ai' : 'me');
+        const visibleText = stripThinkText(message.text || '');
+        if (visibleText.trim()) add(visibleText, message.role === 'assistant' ? 'ai' : 'me');
       }
       if (!(messages || []).length) add('已切换会话。', 'sys');
     }
@@ -394,11 +419,20 @@ function remotePageHtml() {
             } else if (event.type === 'thread_changed') {
               setCurrentThread(event.thread_id);
             } else if (event.type === 'delta') {
-              ensureAiBubble().textContent = event.text || ((activeAiEl && activeAiEl.textContent) || '') + (event.delta || '');
-              messagesEl.scrollTop = messagesEl.scrollHeight;
+              const raw = event.text || ((activeAiEl && activeAiEl.dataset.rawText) || '') + (event.delta || '');
+              const visibleText = stripThinkText(raw);
+              if (visibleText.trim()) {
+                const bubble = ensureAiBubble();
+                bubble.dataset.rawText = raw;
+                bubble.textContent = visibleText;
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              }
             } else if (event.type === 'message') {
-              ensureAiBubble().textContent = event.text || '';
-              activeAiEl.classList.remove('streaming');
+              const visibleText = stripThinkText(event.text || '');
+              if (visibleText.trim()) {
+                ensureAiBubble().textContent = visibleText;
+                activeAiEl.classList.remove('streaming');
+              }
             } else if (event.type === 'error') {
               add(event.message || '远程任务失败', 'sys err');
               done = true;
@@ -659,12 +693,14 @@ class RemoteHost extends EventEmitter {
     if (!turn && payload.staleThreadId) turn = this.remoteTurnByThread(payload.staleThreadId);
     if (!turn) return;
     if (type === 'delta') {
+      const visibleText = stripThinkText(payload.text || '');
+      const visibleDelta = stripThinkText(payload.delta || '');
       this.pushRemoteEvent(turn, {
         type: 'delta',
         thread_id: payload.threadId,
         item_id: payload.itemId,
-        delta: payload.delta || '',
-        text: payload.text || '',
+        delta: visibleDelta,
+        text: visibleText,
       });
     } else if (type === 'message') {
       this.pushRemoteEvent(turn, {
@@ -672,7 +708,7 @@ class RemoteHost extends EventEmitter {
         thread_id: payload.threadId,
         item_id: payload.itemId,
         role: 'assistant',
-        text: payload.text || '',
+        text: stripThinkText(payload.text || ''),
       });
     } else if (type === 'done') {
       this.pushRemoteEvent(turn, {
@@ -933,4 +969,5 @@ module.exports = {
   decryptJson,
   encryptJson,
   networkUrls,
+  stripThinkText,
 };

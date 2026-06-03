@@ -54,10 +54,13 @@ async function listen(server) {
     });
     const text = await res.text();
     assert.strictEqual(res.status, 200);
-    assert.ok(text.includes('思考'));
+    assert.ok(text.includes('"type":"reasoning"'));
+    assert.ok(text.includes('"summary_text","text":"思考"'));
+    assert.ok(!text.includes('"response.output_text.delta","item_id":"msg_0","output_index":0,"content_index":0,"delta":"思考"'));
+    assert.ok(!text.includes('"output_text","text":"思考完成"'));
     assert.ok(text.includes('完成'));
     assert.ok(text.includes('"total_tokens":3'));
-    console.log(JSON.stringify({ ok: true, checks: ['glm_reasoning_content_stream', 'chat_usage_to_responses_usage'] }, null, 2));
+    console.log(JSON.stringify({ ok: true, checks: ['glm_reasoning_item_hidden_from_output_text', 'chat_usage_to_responses_usage'] }, null, 2));
   } finally {
     adapter.close();
     upstream.close();

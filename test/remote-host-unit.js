@@ -38,7 +38,7 @@ async function main() {
         threadId,
         messages: [
           { kind: 'message', role: 'user', text: '之前的问题' },
-          { kind: 'message', role: 'ai', text: '之前的回复' },
+          { kind: 'message', role: 'ai', text: '<think>internal history</think>之前的回复' },
           { kind: 'activity', activityKind: 'reasoning', text: '内部过程不应该给手机端历史' },
         ],
       };
@@ -46,9 +46,9 @@ async function main() {
     async send(text, attachments, threadId) {
       sent.push({ text, attachments, threadId });
       setTimeout(() => {
-        this.emit('delta', { threadId, itemId: 'msg_0', delta: '远程', text: '远程' });
-        this.emit('delta', { threadId, itemId: 'msg_0', delta: '回复', text: '远程回复' });
-        this.emit('message', { threadId, itemId: 'msg_0', text: '远程回复' });
+        this.emit('delta', { threadId, itemId: 'msg_0', delta: '<think>internal streaming', text: '<think>internal streaming' });
+        this.emit('delta', { threadId, itemId: 'msg_0', delta: '</think>远程回复', text: '<think>internal streaming</think>远程回复' });
+        this.emit('message', { threadId, itemId: 'msg_0', text: '<think>internal final</think>远程回复' });
         this.emit('turnDone', { threadId, usage: { total_tokens: 12 } });
       }, 10);
       return { threadId };

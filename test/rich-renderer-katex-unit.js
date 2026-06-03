@@ -139,7 +139,18 @@ class Element extends Node {
   });
   assert.strictEqual(copied[0], '\\int_0^1 x\\,dx = \\frac{1}{2}');
 
-  console.log(JSON.stringify({ ok: true, checks: ['katex_render_called', 'math_copy_button', 'latex_copied'] }, null, 2));
+  const thinkBubble = document.createElement('div');
+  window.DeskAgentRichRenderer.renderMessageContent(
+    thinkBubble,
+    'ai',
+    '<think>We need to reason in English.</think>\n\n最终答案'
+  );
+  assert.strictEqual(thinkBubble.querySelectorAll('.think-details').length, 1);
+  assert.ok(thinkBubble.textContent.includes('思考中'));
+  assert.ok(thinkBubble.textContent.includes('最终答案'));
+  assert.ok(!thinkBubble.textContent.includes('<think>'));
+
+  console.log(JSON.stringify({ ok: true, checks: ['katex_render_called', 'math_copy_button', 'latex_copied', 'think_collapsed'] }, null, 2));
 })().catch((error) => {
   console.error('RICH_RENDERER_KATEX_UNIT_ERROR', error && error.stack ? error.stack : error);
   process.exit(1);

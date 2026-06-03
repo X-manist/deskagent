@@ -153,6 +153,19 @@ function makeResponsesWriter(res, responseId) {
         item: { id: 'msg_0', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: text || '' }] },
       });
     },
+    reasoningDone(text, outputIndex) {
+      const value = String(text || '').trim();
+      if (!value) return;
+      send('response.output_item.done', {
+        output_index: outputIndex,
+        item: {
+          id: 'rs_0',
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: value }],
+          content: [{ type: 'reasoning_text', text: value }],
+        },
+      });
+    },
     functionCallDone(call, index) {
       send('response.output_item.done', {
         output_index: index,
@@ -252,6 +265,7 @@ async function streamTranslate(upstreamResp, writer) {
   return new Promise((resolve) => {
     let buf = '';
     let fullText = '';
+    let reasoningText = '';
     let usage = null;
     const toolCalls = []; // index -> {id,name,arguments}
     let finished = false;
@@ -259,8 +273,12 @@ async function streamTranslate(upstreamResp, writer) {
     function finish() {
       if (finished) return;
       finished = true;
-      if (fullText) writer.messageDone(fullText);
-      let idx = 1;
+      const hasMessage = !!fullText;
+      const hasReasoning = !!String(reasoningText || '').trim();
+      if (hasMessage) writer.messageDone(fullText);
+      if (hasReasoning) writer.reasoningDone(reasoningText, hasMessage ? 1 : 0);
+      let idx = (hasMessage ? 1 : 0) + (hasReasoning ? 1 : 0);
+      if (idx < 1) idx = 1;
       for (const c of toolCalls) {
         if (c && (c.name || c.arguments)) writer.functionCallDone(c, idx++);
       }
@@ -273,12 +291,12 @@ async function streamTranslate(upstreamResp, writer) {
       const choice = obj.choices && obj.choices[0];
       if (!choice) return;
       const delta = choice.delta || {};
-      const deltaText = typeof delta.content === 'string' && delta.content
-        ? delta.content
-        : (typeof delta.reasoning_content === 'string' ? delta.reasoning_content : '');
-      if (deltaText) {
-        fullText += deltaText;
-        writer.outputTextDelta(deltaText);
+      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+        reasoningText += delta.reasoning_content;
+      }
+      if (typeof delta.content === 'string' && delta.content) {
+        fullText += delta.content;
+        writer.outputTextDelta(delta.content);
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const tc of delta.tool_calls) {

@@ -210,7 +210,7 @@ function makeActivityEl(kind, text) {
     const details = document.createElement('details');
     const summary = document.createElement('summary');
     const body = document.createElement('div');
-    summary.textContent = '思考过程';
+    summary.textContent = '思考中';
     body.className = 'activity-body';
     body.textContent = text || '';
     details.appendChild(summary);

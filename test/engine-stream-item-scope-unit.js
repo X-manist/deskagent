@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('assert');
-const { Engine } = require('../app/src/main/engine');
+const { Engine, reasoningSummaryText } = require('../app/src/main/engine');
 
 function runTurn(engine, threadId, turnId, text) {
   engine._onNotification('turn/started', { threadId, turn: { id: turnId } });
@@ -37,6 +37,7 @@ assert.strictEqual(observed.deltas[1].itemId, observed.messages[0].itemId);
 assert.strictEqual(observed.deltas[3].itemId, observed.messages[1].itemId);
 assert.strictEqual(observed.deltas[1].text, '第一轮回复');
 assert.strictEqual(observed.deltas[3].text, '第二轮回复');
+assert.strictEqual(reasoningSummaryText(['旧摘要', { type: 'summary_text', text: '标准摘要' }]), '旧摘要\n标准摘要');
 
 console.log(JSON.stringify({
   ok: true,
@@ -44,5 +45,6 @@ console.log(JSON.stringify({
     'same_upstream_item_id_scoped_by_turn',
     'second_turn_does_not_overwrite_first_bubble',
     'completed_message_reuses_delta_bubble',
+    'reasoning_summary_objects_normalized',
   ],
 }, null, 2));

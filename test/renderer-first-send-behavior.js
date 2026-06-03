@@ -290,7 +290,7 @@ async function runScenario({ trigger, currentThreadOnSend }) {
   const messagesText = textOf(activity.elements.get('messages'));
   assert.ok(!messagesText.includes('codex.list_mcp_resource_templates'), 'internal tool names must stay hidden');
   assert.ok(!messagesText.includes('internal command'), 'internal commands must stay hidden');
-  assert.ok(messagesText.includes('思考过程'), 'reasoning should render as a collapsed details label');
+  assert.ok(messagesText.includes('思考中'), 'reasoning should render as a collapsed details label');
   assert.ok(messagesText.includes('内部思考摘要'), 'reasoning body should remain available after expanding');
   assert.ok(activity.elements.get('messages').querySelector('details'), 'reasoning should use a details element');
 

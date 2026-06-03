@@ -1064,7 +1064,30 @@ button {
   cursor: pointer;
   color: var(--muted);
   font-weight: 650;
-  list-style-position: inside;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  min-height: 24px;
+}
+
+.activity summary::-webkit-details-marker {
+  display: none;
+}
+
+.activity summary::after {
+  content: "展开";
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--accent-strong);
+  background: var(--paper);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.activity details[open] summary::after {
+  content: "收起";
 }
 
 .activity-body {
@@ -1075,6 +1098,71 @@ button {
   font-family: var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.rich .think-details {
+  max-width: min(720px, 100%);
+  margin: 4px 0 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--gold);
+  border-radius: 10px;
+  background: var(--paper-soft);
+  color: var(--muted);
+}
+
+.rich .think-details summary {
+  min-height: 30px;
+  padding: 5px 8px 5px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.rich .think-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.rich .think-label {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.rich .think-action::after {
+  content: "展开";
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--accent-strong);
+  background: var(--paper);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.rich .think-details[open] .think-action::after {
+  content: "收起";
+}
+
+.rich .think-body {
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .composer {

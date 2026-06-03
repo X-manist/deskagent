@@ -75,6 +75,18 @@ function normalizeUpstreamBaseUrl(baseUrl) {
   }
 }
 
+function reasoningSummaryText(summary) {
+  if (!Array.isArray(summary)) return '';
+  return summary
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part.text === 'string') return part.text;
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
 function resolveAgentRuntimeBin() {
   if (process.env.CODEX_BIN && fs.existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN;
   // packaged native runtime binary (branded name; never exposes the upstream name)
@@ -559,8 +571,9 @@ class Engine extends EventEmitter {
           out.push({ kind: 'activity', activityKind: 'command', text: item.command || '' });
         } else if (item.type === 'fileChange') {
           out.push({ kind: 'activity', activityKind: 'file', files: (item.changes || []).map((c) => c.path) });
-        } else if (item.type === 'reasoning' && Array.isArray(item.summary) && item.summary.length) {
-          out.push({ kind: 'activity', activityKind: 'reasoning', text: item.summary.join('\n') });
+        } else if (item.type === 'reasoning') {
+          const summaryText = reasoningSummaryText(item.summary);
+          if (summaryText) out.push({ kind: 'activity', activityKind: 'reasoning', text: summaryText });
         }
       }
     }
@@ -730,7 +743,7 @@ class Engine extends EventEmitter {
         files: (item.changes || []).map((c) => c.path),
       });
     } else if (t === 'reasoning' && phase === 'completed') {
-      this.emit('activity', { threadId, kind: 'reasoning', phase, text: (item.summary || []).join('\n') || itemText });
+      this.emit('activity', { threadId, kind: 'reasoning', phase, text: reasoningSummaryText(item.summary) || itemText });
     }
   }
 
@@ -897,4 +910,4 @@ class Engine extends EventEmitter {
   }
 }
 
-module.exports = { Engine, STATE };
+module.exports = { Engine, STATE, reasoningSummaryText };

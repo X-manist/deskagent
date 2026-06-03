@@ -246,10 +246,55 @@
     container.appendChild(figure);
   }
 
-  function renderRichText(container, text) {
-    container.textContent = '';
-    const root = document.createElement('div');
-    root.className = 'rich';
+  function cleanThinkText(text) {
+    return String(text || '')
+      .replace(/^```(?:think|thinking)[^\n]*\n?/i, '')
+      .replace(/\n?```\s*$/i, '')
+      .replace(/^<think(?:ing)?\b[^>]*>/i, '')
+      .replace(/<\/think(?:ing)?>\s*$/i, '')
+      .replace(/<\/think(?:ing)?>/gi, '')
+      .replace(/^&lt;think(?:ing)?\b[^&]*?&gt;/i, '')
+      .replace(/&lt;\/think(?:ing)?&gt;\s*$/i, '')
+      .replace(/&lt;\/think(?:ing)?&gt;/gi, '')
+      .trim();
+  }
+
+  function splitThinkSegments(text) {
+    const source = String(text || '');
+    const pattern = /```(?:think|thinking)[^\n]*\n[\s\S]*?(?:\n```\s*|$)|<think(?:ing)?\b[^>]*>[\s\S]*?(?:<\/think(?:ing)?>|$)|&lt;think(?:ing)?\b[^&]*?&gt;[\s\S]*?(?:&lt;\/think(?:ing)?&gt;|$)/gi;
+    const segments = [];
+    let last = 0;
+    let match;
+    while ((match = pattern.exec(source))) {
+      if (match.index > last) segments.push({ kind: 'text', text: source.slice(last, match.index) });
+      segments.push({ kind: 'think', text: cleanThinkText(match[0]) });
+      last = pattern.lastIndex;
+      if (match[0] && !/(<\/think(?:ing)?>|&lt;\/think(?:ing)?&gt;|\n```\s*)$/i.test(match[0])) break;
+    }
+    if (last < source.length) segments.push({ kind: 'text', text: source.slice(last) });
+    return segments.length ? segments : [{ kind: 'text', text: source }];
+  }
+
+  function appendThinkDetails(container, text) {
+    const details = document.createElement('details');
+    details.className = 'think-details';
+    const summary = document.createElement('summary');
+    const label = document.createElement('span');
+    label.className = 'think-label';
+    label.textContent = '思考中';
+    const action = document.createElement('span');
+    action.className = 'think-action';
+    summary.appendChild(label);
+    summary.appendChild(action);
+    const body = document.createElement('div');
+    body.className = 'think-body';
+    body.textContent = text || '推理过程已隐藏';
+    details.appendChild(summary);
+    details.appendChild(body);
+    container.appendChild(details);
+  }
+
+  function renderMarkdownFragment(root, text) {
     const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
     const state = { paragraph: [] };
     let i = 0;
@@ -382,6 +427,16 @@
       i += 1;
     }
     appendParagraph(root, state);
+  }
+
+  function renderRichText(container, text) {
+    container.textContent = '';
+    const root = document.createElement('div');
+    root.className = 'rich';
+    for (const segment of splitThinkSegments(text)) {
+      if (segment.kind === 'think') appendThinkDetails(root, segment.text);
+      else renderMarkdownFragment(root, segment.text);
+    }
     container.appendChild(root);
   }
 
