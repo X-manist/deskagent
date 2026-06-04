@@ -101,6 +101,12 @@ th { color: var(--muted); font-weight: 600; }
 .inline-field {
   min-width: 220px;
 }
+.small-field {
+  min-width: 150px;
+}
+.tiny-field {
+  min-width: 110px;
+}
 .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 h2 { margin: 0; }
 .modal-bg {

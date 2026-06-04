@@ -104,6 +104,13 @@ async fn list_users(
         .bind(id)
         .fetch_one(&st.db)
         .await?;
+        let points_remaining: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(token_allowance - tokens_used),0) FROM entitlements
+             WHERE user_id = ? AND status='active' AND expires_at > datetime('now')",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
         let spent: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE user_id = ? AND status='granted'",
         )
@@ -115,6 +122,8 @@ async fn list_users(
             "free_turns_used": free_used,
             "free_turns_total": st.cfg.free_turns,
             "free_turns_remaining": (st.cfg.free_turns - free_used).max(0),
+            "points_remaining": points_remaining.max(0),
+            "tokens_remaining": points_remaining.max(0),
             "turns": turns, "tokens": tokens,
             "spent_cents": spent,
             "spent_yuan": format!("{:.2}", spent as f64 / 100.0),
@@ -127,6 +136,16 @@ async fn list_users(
 #[derive(Deserialize)]
 struct TestUserReq {
     phone: Option<String>,
+    #[serde(default)]
+    points: Option<i64>,
+    #[serde(default)]
+    token_allowance: Option<i64>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    duration_days: Option<i64>,
+    #[serde(default = "default_multiplier")]
+    token_multiplier: f64,
 }
 
 fn valid_phone(p: &str) -> bool {
@@ -149,6 +168,29 @@ async fn create_test_user(
     if !valid_phone(&phone) {
         return Err(AppError::bad("手机号格式不正确"));
     }
+    let allowance = req.points.or(req.token_allowance).unwrap_or(0);
+    if allowance < 0 {
+        return Err(AppError::bad("测试积分不能为负数"));
+    }
+    if allowance > i64::from(i32::MAX) * 1_000_000 {
+        return Err(AppError::bad("测试积分过大"));
+    }
+    let duration_days = req.duration_days.unwrap_or(30);
+    if allowance > 0 && duration_days <= 0 {
+        return Err(AppError::bad("测试积分有效天数必须大于 0"));
+    }
+    if !req.token_multiplier.is_finite() || req.token_multiplier <= 0.0 {
+        return Err(AppError::bad("计费倍率必须大于 0"));
+    }
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(st.cfg.default_model.as_str())
+        .to_string();
+
+    let mut tx = st.db.begin().await?;
     let (id, free_used): (i64, i64) = sqlx::query_as(
         "INSERT INTO users (phone, last_login_at)
          VALUES (?, datetime('now'))
@@ -156,14 +198,61 @@ async fn create_test_user(
          RETURNING id, free_turns_used",
     )
     .bind(&phone)
-    .fetch_one(&st.db)
+    .fetch_one(&mut *tx)
     .await?;
+    let replaces_test_allowance = req.points.is_some() || req.token_allowance.is_some();
+    if replaces_test_allowance {
+        sqlx::query(
+            "UPDATE entitlements SET status='revoked'
+             WHERE user_id = ? AND order_id IS NULL AND status='active'",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let entitlement = if allowance > 0 {
+        let (entitlement_id, expires_at): (i64, String) = sqlx::query_as(
+            "INSERT INTO entitlements (user_id, order_id, model, token_allowance, token_multiplier, expires_at, status)
+             VALUES (?, NULL, ?, ?, ?, datetime('now', ?), 'active')
+             RETURNING id, expires_at",
+        )
+        .bind(id)
+        .bind(&model)
+        .bind(allowance)
+        .bind(req.token_multiplier)
+        .bind(format!("+{duration_days} days"))
+        .fetch_one(&mut *tx)
+        .await?;
+        Some(json!({
+            "id": entitlement_id,
+            "model": &model,
+            "token_allowance": allowance,
+            "points": allowance,
+            "token_multiplier": req.token_multiplier,
+            "tokens_used": 0,
+            "tokens_remaining": allowance,
+            "points_remaining": allowance,
+            "duration_days": duration_days,
+            "expires_at": expires_at,
+        }))
+    } else {
+        None
+    };
+    tx.commit().await?;
+
     let token = issue_user_token(&st.cfg.user_jwt_secret, id, &phone);
     db::audit(
         &st.db,
         &a.0.username,
         "create_test_user",
-        &format!("user #{id} {phone}"),
+        &format!(
+            "user #{id} {phone}{}",
+            if allowance > 0 {
+                format!(" +{allowance} points {model} x{}/{}d", req.token_multiplier, duration_days)
+            } else {
+                String::new()
+            }
+        ),
     )
     .await;
     Ok(Json(json!({
@@ -175,6 +264,7 @@ async fn create_test_user(
             "free_turns_used": free_used,
             "free_turns_remaining": (st.cfg.free_turns - free_used).max(0),
         },
+        "entitlement": entitlement,
         "token": token,
     })))
 }

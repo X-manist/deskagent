@@ -891,18 +891,74 @@ const memberEl = $('#member');
 let loggedIn = false;
 let codeTimer = null;
 
+const EN_PACKAGE_NAMES = new Map([
+  ['月度会员', 'Monthly Plan'],
+  ['年度会员', 'Annual Plan'],
+  ['测试套餐', 'Test Plan'],
+  ['体验套餐', 'Trial Plan'],
+]);
+
+function currentLocale() {
+  let stored = '';
+  try {
+    stored = (window.localStorage && (
+      window.localStorage.getItem('deskagent.locale')
+      || window.localStorage.getItem('deskagent.language')
+      || window.localStorage.getItem('locale')
+      || window.localStorage.getItem('language')
+    )) || '';
+  } catch (_) {}
+  const docEl = document.documentElement || {};
+  const bodyEl = document.body || {};
+  const lang = stored
+    || (docEl.dataset && (docEl.dataset.locale || docEl.dataset.lang))
+    || (bodyEl.dataset && (bodyEl.dataset.locale || bodyEl.dataset.lang))
+    || docEl.lang
+    || (typeof navigator !== 'undefined' && navigator.language)
+    || '';
+  return String(lang || '').toLowerCase();
+}
+
+function isEnglishUi() {
+  return currentLocale().startsWith('en');
+}
+
+function t(zh, en) {
+  return isEnglishUi() ? en : zh;
+}
+
+function hasCjk(value) {
+  return /[\u3400-\u9fff]/.test(String(value || ''));
+}
+
+function packageDisplayName(pkg) {
+  const raw = String((pkg && (pkg.name_en || pkg.name)) || '').trim();
+  if (!isEnglishUi()) return raw || t('套餐', 'Plan');
+  if (pkg && pkg.name_en) return String(pkg.name_en).trim();
+  if (EN_PACKAGE_NAMES.has(raw)) return EN_PACKAGE_NAMES.get(raw);
+  if (hasCjk(raw)) return `Plan #${pkg && pkg.id ? pkg.id : ''}`.trim();
+  return raw || `Plan #${pkg && pkg.id ? pkg.id : ''}`.trim();
+}
+
+if (typeof window !== 'undefined') {
+  window.__deskagentAccountI18n = {
+    packageDisplayName,
+    isEnglishUi,
+  };
+}
+
 function setLoggedIn(state) {
   loggedIn = !!(state && state.loggedIn);
   if (loggedIn) {
     loginOverlay.classList.add('hidden');
     if (memberEl) {
-      memberEl.textContent = '账户：' + (state.phone || '已登录');
+      memberEl.textContent = `${t('账户', 'Account')}: ${state.phone || t('已登录', 'Signed in')}`;
       memberEl.style.cursor = 'pointer';
     }
     refreshAccountBadge();
   } else {
     loginOverlay.classList.remove('hidden');
-    if (memberEl) memberEl.textContent = '会员：未登录';
+    if (memberEl) memberEl.textContent = `${t('会员', 'Membership')}: ${t('未登录', 'Signed out')}`;
   }
 }
 
@@ -912,8 +968,8 @@ async function refreshAccountBadge() {
     const ent = (me.entitlements || []).reduce((a, e) => a + (e.tokens_remaining || 0), 0);
     if (memberEl) {
       memberEl.textContent = ent > 0
-        ? `会员：剩余 ${ent.toLocaleString()} Token`
-        : `免费额度：剩余 ${me.free_turns_remaining} 次`;
+        ? `${t('会员', 'Membership')}: ${t('剩余', 'remaining')} ${ent.toLocaleString()} Token`
+        : `${t('免费额度', 'Free quota')}: ${t('剩余', 'remaining')} ${me.free_turns_remaining} ${t('次', 'turns')}`;
     }
   } catch (_) {}
 }
@@ -933,6 +989,10 @@ function escapeAttr(value) {
     '"': '&quot;',
     "'": '&#39;',
   }[ch]));
+}
+
+function escapeHtml(value) {
+  return escapeAttr(value);
 }
 
 const sendCodeBtn = $('#sendCodeBtn');
@@ -998,26 +1058,34 @@ loginBtn.addEventListener('click', async () => {
 async function openAccount() {
   if (!loggedIn) return;
   accountModal.classList.remove('hidden');
+  const titleEl = accountModal.querySelector('h2');
+  const sectionEl = accountModal.querySelector('.section-title');
+  const logoutEl = $('#logoutBtn');
+  const closeEl = $('#closeAccount');
   const infoEl = $('#accountInfo');
   const listEl = $('#packageList');
   const errEl = $('#accountErr');
+  if (titleEl) titleEl.textContent = t('我的账户', 'My Account');
+  if (sectionEl) sectionEl.textContent = t('充值套餐', 'Plans');
+  if (logoutEl) logoutEl.textContent = t('退出登录', 'Sign out');
+  if (closeEl) closeEl.textContent = t('关闭', 'Close');
   errEl.textContent = '';
-  infoEl.textContent = '加载中…';
+  infoEl.textContent = t('加载中…', 'Loading...');
   listEl.innerHTML = '';
   try {
     const me = await window.api.auth.me();
     const ents = me.entitlements || [];
-    let html = `<div>手机号：${me.phone}</div>`;
-    html += `<div>免费额度：${me.free_turns_remaining}/${me.free_turns_total} 次</div>`;
+    let html = `<div>${t('手机号', 'Phone')}: ${escapeHtml(me.phone)}</div>`;
+    html += `<div>${t('免费额度', 'Free quota')}: ${me.free_turns_remaining}/${me.free_turns_total} ${t('次', 'turns')}</div>`;
     if (ents.length) {
       ents.forEach((e) => {
         const pct = e.token_allowance ? Math.max(0, Math.min(100, (e.tokens_remaining / e.token_allowance) * 100)) : 0;
         const multiplier = Number(e.token_multiplier || 1).toFixed(2);
-        html += `<div style="margin-top:8px">套餐(${e.model})：剩余 ${e.tokens_remaining.toLocaleString()} / ${e.token_allowance.toLocaleString()} 积分 · ${multiplier}x（至 ${e.expires_at}）`;
+        html += `<div style="margin-top:8px">${t('套餐', 'Plan')} (${escapeHtml(e.model)}): ${t('剩余', 'remaining')} ${e.tokens_remaining.toLocaleString()} / ${e.token_allowance.toLocaleString()} ${t('积分', 'points')} · ${multiplier}x (${t('至', 'until')} ${escapeHtml(e.expires_at)})`;
         html += `<div class="quota-bar"><span style="width:${pct}%"></span></div></div>`;
       });
     } else {
-      html += `<div style="margin-top:8px;color:#9aa3bd">暂无有效会员套餐</div>`;
+      html += `<div style="margin-top:8px;color:#9aa3bd">${t('暂无有效会员套餐', 'No active plan')}</div>`;
     }
     infoEl.innerHTML = html;
 
@@ -1026,16 +1094,16 @@ async function openAccount() {
       const row = document.createElement('div');
       row.className = 'pkg';
       const multiplier = Number(p.token_multiplier || 1).toFixed(2);
-      row.innerHTML = `<div><div class="pkg-name">${p.name}</div>` +
-        `<div class="pkg-meta">${p.model} · ${p.total_tokens.toLocaleString()} 积分 · ${multiplier}x · ${p.duration_days} 天</div></div>` +
+      row.innerHTML = `<div><div class="pkg-name">${escapeHtml(packageDisplayName(p))}</div>` +
+        `<div class="pkg-meta">${escapeHtml(p.model)} · ${p.total_tokens.toLocaleString()} ${t('积分', 'points')} · ${multiplier}x · ${p.duration_days} ${t('天', 'days')}</div></div>` +
         `<div style="display:flex;align-items:center;gap:10px"><span class="pkg-price">¥${p.price_yuan}</span>` +
-        `<button class="send-btn">购买</button></div>`;
+        `<button class="send-btn">${t('购买', 'Buy')}</button></div>`;
       row.querySelector('button').addEventListener('click', () => buyPackage(p, errEl));
       listEl.appendChild(row);
     });
   } catch (e) {
     infoEl.textContent = '';
-    errEl.textContent = e && e.message ? e.message : '加载失败';
+    errEl.textContent = e && e.message ? e.message : t('加载失败', 'Failed to load');
   }
 }
 
@@ -1045,14 +1113,14 @@ async function buyPackage(p, errEl) {
     const order = await window.api.auth.createOrder(p.id, 'wechat');
     const pay = order && order.pay_info ? order.pay_info : {};
     if (pay.pay_url) {
-      errEl.innerHTML = `订单已创建，请完成支付后自动到账。<a href="${escapeAttr(pay.pay_url)}" target="_blank" rel="noreferrer">打开支付</a>`;
+      errEl.innerHTML = `${t('订单已创建，请完成支付后自动到账。', 'Order created. Complete payment and the plan will activate automatically.')}<a href="${escapeAttr(pay.pay_url)}" target="_blank" rel="noreferrer">${t('打开支付', 'Open payment')}</a>`;
     } else {
       errEl.textContent = order && order.out_trade_no
-        ? `订单已创建（${order.out_trade_no}），等待支付通道返回支付链接后到账。`
-        : '订单已创建，完成支付后自动到账。';
+        ? `${t('订单已创建', 'Order created')} (${order.out_trade_no}). ${t('等待支付通道返回支付链接后到账。', 'Waiting for payment provider details before activation.')}`
+        : t('订单已创建，完成支付后自动到账。', 'Order created. Complete payment and the plan will activate automatically.');
     }
   } catch (e) {
-    errEl.textContent = e && e.message ? e.message : '购买失败';
+    errEl.textContent = e && e.message ? e.message : t('购买失败', 'Purchase failed');
   }
 }
 
