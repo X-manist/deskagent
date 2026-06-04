@@ -1,0 +1,4 @@
+interface:
+  display_name: "IFU Research Idea"
+  short_description: "Plain-language, field-grounded paper idea generation"
+  default_prompt: "Use $ifu-research-idea to learn the field, explain why the problem is worth doing, compare prior-work limitations in a table, detail concrete research challenges, state the insight-driven motivation, propose a plausible solution, debate candidates, and generate executable paper ideas in a concrete, easy-to-understand style."

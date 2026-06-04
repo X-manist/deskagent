@@ -240,20 +240,10 @@ button {
   background: var(--line-strong);
 }
 
-.sidebar-top,
 .sidebar-sessions {
   display: flex;
   flex-direction: column;
   min-height: 0;
-}
-
-.sidebar-top {
-  flex: 0 1 auto;
-}
-
-.sidebar-top .skills {
-  max-height: 28vh;
-  overflow: auto;
 }
 
 .sidebar-sessions {
@@ -261,15 +251,6 @@ button {
   min-height: 72px;
 }
 
-.skills {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-  min-height: 44px;
-  align-content: start;
-}
-
-.skills:empty::before,
 .sessions:empty::before {
   content: "暂无内容";
   display: block;
@@ -280,7 +261,6 @@ button {
   font-size: 12px;
 }
 
-.skill-btn,
 .quick-btn,
 .ghost-btn,
 .mini-btn {
@@ -290,21 +270,6 @@ button {
   cursor: pointer;
 }
 
-.skill-btn {
-  display: -webkit-box;
-  min-height: 38px;
-  padding: 9px 9px;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12.5px;
-  line-height: 1.35;
-  text-align: left;
-  word-break: break-word;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.skill-btn:hover,
 .quick-btn:hover,
 .ghost-btn:hover,
 .mini-btn:hover,
@@ -1714,10 +1679,6 @@ body.dragging #app::after {
     gap: 8px;
   }
 
-  .sidebar-top .skills {
-    max-height: 18vh;
-  }
-
   .sidebar-bottom {
     gap: 5px;
   }
@@ -1772,22 +1733,9 @@ body.dragging #app::after {
     min-height: 38px;
   }
 
-  .sidebar-top .skills {
-    max-height: 42px;
-  }
-
   .sidebar-sessions {
     flex: 0 1 auto;
     min-height: 48px;
-  }
-
-  .skills {
-    min-height: 38px;
-  }
-
-  .skill-btn {
-    min-height: 36px;
-    padding: 7px 8px;
   }
 
   .sessions:empty::before {

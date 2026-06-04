@@ -593,7 +593,7 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
 });
 
-// Quick prompts + skills
+// Quick prompts
 document.querySelectorAll('.quick-btn').forEach((b) => {
   b.addEventListener('click', () => {
     inputEl.value = b.dataset.prompt;
@@ -881,19 +881,6 @@ window.api.on('workspace:changed', (p) => {
     activeId = info.currentThreadId;
   }
   setModelTag(info.settings);
-  const skillsEl = $('#skills');
-  skillsEl.innerHTML = '';
-  (info.skills || []).forEach((s) => {
-    const b = document.createElement('button');
-    b.className = 'skill-btn';
-    b.textContent = s.title;
-    b.title = s.description || s.title;
-    b.addEventListener('click', () => {
-      inputEl.value = `使用「${s.title}」技能：`;
-      inputEl.focus();
-    });
-    skillsEl.appendChild(b);
-  });
   showWelcome();
 })();
 

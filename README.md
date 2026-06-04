@@ -5,7 +5,7 @@
 - **内核**：内置 agent runtime + 本地 `Responses -> Chat Completions` 适配层
 - **桌面壳**：Electron
 - **默认模型**：已接入 GLM（`glm-4.6`）
-- **内置技能**：文字润色 / 中英互译 / 内容总结 / 数据分析
+- **内置技能**：文字润色 / 中英互译 / 内容总结 / 数据分析，并支持自动发现/按需安装/主题沉淀
 - **交互目标**：中文界面、免技能安装、免复杂配置、打开即聊
 
 ## 当前实现
@@ -15,8 +15,8 @@
 1. Electron 主进程负责窗口、设置、工作目录、`agentconfig/` 安装与会话管理。
 2. 本地 adapter 对外提供 OpenAI **Responses API** 兼容接口，向上游 GLM 的 `/chat/completions` 转换。
 3. 内置 agent runtime 连接 adapter，负责对话、工具调用、技能加载、文件操作。
-4. 渲染层提供中文聊天 UI、状态栏、设置面板、快捷指令与技能入口。
-5. 默认 MCP profile 为 `core`：只自动启用本地 `deskagent` 桌面桥接工具，保证邮件、微信、桌面控制、定时任务等核心能力在模型侧直接可见；第三方 MCP 示例保留给开发调试，不在正式一键安装中默认打扰用户。
+4. 渲染层提供中文聊天 UI、状态栏、设置面板与会话管理；技能由 agent 自动发现，不在左侧做手动技能栏。
+5. 默认 MCP profile 为 `core`：自动启用本地 `deskagent` 桌面桥接工具与持久化 memory，保证邮件、微信、桌面控制、定时任务和跨会话记忆等核心能力在模型侧直接可见；第三方 MCP 示例保留给开发调试，不在正式一键安装中默认打扰用户。
 
 ### 已完成能力
 
@@ -24,6 +24,9 @@
 - 一键打开工作目录
 - 会员套餐控制模型、积分、计费倍率和价格；桌面端不暴露手动 API 配置
 - `agentconfig/` 整体同步到独立 agent home（不再只有 skills）
+- 默认按 `agentconfig/skills/find-skills` 规则自动查找本地技能、按需联网搜索/安装技能
+- 支持把用户确认的稳定主题流程写入 `agent-home/skills/<slug>/SKILL.md`，后续会话自动触发
+- 已开启跨 session memory，长期偏好和项目事实沉淀在 `agent-home/memories/`
 - 新会话 / 历史会话列表 / 会话恢复
 - 自动绕过本机代理访问 `127.0.0.1`
 - 打包时自动捆绑本机平台对应的 **native agent runtime**

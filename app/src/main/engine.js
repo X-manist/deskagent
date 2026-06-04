@@ -177,6 +177,8 @@ class Engine extends EventEmitter {
     const runtimeDir = path.join(this.opts.agentHome, 'runtime');
     const mplDir = path.join(runtimeDir, 'mpl');
     fs.mkdirSync(mplDir, { recursive: true });
+    fs.mkdirSync(path.join(runtimeDir, 'npm-cache'), { recursive: true });
+    fs.mkdirSync(path.join(runtimeDir, 'uv-cache'), { recursive: true });
     const matplotlibrc = [
       'font.family: sans-serif',
       // Common CJK-capable fonts across macOS / Windows / Linux. matplotlib uses
@@ -238,6 +240,9 @@ class Engine extends EventEmitter {
       // CN-friendly Python installs without manual config.
       PIP_INDEX_URL: pipIndex,
       PIP_DISABLE_PIP_VERSION_CHECK: '1',
+      NPM_CONFIG_CACHE: path.join(runtimeDir, 'npm-cache'),
+      npm_config_cache: path.join(runtimeDir, 'npm-cache'),
+      UV_CACHE_DIR: path.join(runtimeDir, 'uv-cache'),
       // Transparent github.com -> CN mirror rewrite for git clone/download.
       GIT_CONFIG_GLOBAL: path.join(runtimeDir, 'gitconfig'),
       GIT_TERMINAL_PROMPT: '0',
@@ -334,6 +339,8 @@ class Engine extends EventEmitter {
   _writeConfig() {
     fs.mkdirSync(this.opts.agentHome, { recursive: true });
     fs.mkdirSync(path.join(this.opts.agentHome, 'skills'), { recursive: true });
+    fs.mkdirSync(path.join(this.opts.agentHome, 'memories'), { recursive: true });
+    fs.mkdirSync(path.join(this.opts.agentHome, 'runtime'), { recursive: true });
     const cfg = [
       `model = "${this.settings().model}"`,
       'model_provider = "relay"',
@@ -343,6 +350,18 @@ class Engine extends EventEmitter {
       // the relay's hosted web_search so the model can search the internet
       // automatically with no extra MCP server.
       'web_search = "live"',
+      '',
+      '[features]',
+      'memories = true',
+      '',
+      '[memories]',
+      'use_memories = true',
+      'generate_memories = true',
+      'dedicated_tools = true',
+      'disable_on_external_context = false',
+      '',
+      '[sandbox_workspace_write]',
+      `writable_roots = [${tomlString(path.join(this.opts.agentHome, 'skills'))}, ${tomlString(path.join(this.opts.agentHome, 'memories'))}, ${tomlString(path.join(this.opts.agentHome, 'runtime'))}]`,
       '',
       '[model_providers.relay]',
       'name = "DeskAgent Relay"',
@@ -361,11 +380,24 @@ class Engine extends EventEmitter {
   _bundledMcpConfig() {
     const profile = (this.settings().mcpProfile || process.env.DESKAGENT_MCP_PROFILE || 'core').toLowerCase();
     if (profile !== 'full') {
-      return [
+      const lines = [
         '# Bundled MCP profile: core',
-        '# Only the local desktop bridge is enabled by default so core tools stay directly visible.',
+        '# The local desktop bridge stays directly visible; memory is enabled for cross-session recall.',
         '# Set DESKAGENT_MCP_PROFILE=full for development to merge agentconfig/mcp/*.toml.',
-      ].join('\n');
+      ];
+      if (hasCommand('npx')) {
+        lines.push(
+          '',
+          '[mcp_servers.memory]',
+          'default_tools_approval_mode = "approve"',
+          'command = "npx"',
+          'args = ["-y", "@modelcontextprotocol/server-memory"]',
+          '',
+          '[mcp_servers.memory.env]',
+          `MEMORY_FILE_PATH = ${tomlString(path.join(this.opts.agentHome, 'memory.json'))}`
+        );
+      }
+      return lines.join('\n');
     }
 
     const fragments = sortedFiles(path.join(this.opts.agentHome, 'mcp'), (name) => name.endsWith('.toml'));
@@ -382,7 +414,10 @@ class Engine extends EventEmitter {
             .replace(/\/path\/to\/workspace/g, this.opts.workspaceDir)
             .replace(/\/path\/to\/repo/g, this.opts.workspaceDir)
             .replace(/\/path\/to\/db\.sqlite/g, sqlitePath);
-          return `\n# --- agentconfig/mcp/${name} ---\n${text.trim()}\n`;
+          const extra = name === 'general.toml'
+            ? `\n\n[mcp_servers.memory.env]\nMEMORY_FILE_PATH = ${tomlString(path.join(this.opts.agentHome, 'memory.json'))}`
+            : '';
+          return `\n# --- agentconfig/mcp/${name} ---\n${text.trim()}${extra}\n`;
         }),
       ].join('\n');
     }
@@ -478,8 +513,26 @@ class Engine extends EventEmitter {
       '',
       body,
       '',
+      this._deskagentDynamicCapabilityRules(),
+      '',
     ].join('\n');
     fs.writeFileSync(path.join(this.opts.agentHome, 'AGENTS.md'), text);
+  }
+
+  _deskagentDynamicCapabilityRules() {
+    const skillsDir = path.join(this.opts.agentHome, 'skills');
+    const memoriesDir = path.join(this.opts.agentHome, 'memories');
+    return [
+      '## DeskAgent 动态能力与记忆',
+      '',
+      '- 技能选择不由用户手动操作。每次遇到专门任务时，先自动查看本地可用 skills，优先复用 `skills/<name>/SKILL.md` 中最匹配的技能。',
+      '- 当用户询问“能不能做某类事”、需要新领域能力、或本地没有合适技能时，优先按 `skills/find-skills/SKILL.md` 的流程处理：先用本地与已知来源判断，再在需要联网时搜索 skills.sh / `npx skills find`，确认来源质量后再建议或安装。',
+      '- 在线安装技能前要说明来源、用途和风险；只有在用户同意后，才运行 `npx skills add <package> -g -y` 或等价安装命令。安装后必须确认新的 `SKILL.md` 已落在本地 `skills/` 下；如果安装器写到了其他位置，需要复制/整理到本地 `skills/<slug>/SKILL.md` 后才算完成。',
+      `- 如果用户在对话中反复形成了稳定主题、固定流程、写作风格、业务规则或工具步骤，并明确表示“记住/以后都这样/做成技能/沉淀下来”，可以创建或更新本地主题 skill：写入 \`${skillsDir}/<slug>/SKILL.md\`。slug 使用小写英文、数字和连字符；内容至少包含 frontmatter 的 \`name\`、\`description\`，以及清晰触发条件、步骤、输出格式和约束。`,
+      '- 动态写入 skill 后，回复用户新 skill 的名称和保存位置；后续会话会自动扫描该目录并按需触发，无需左侧技能栏。',
+      '- 使用跨 session memory：任务涉及用户长期偏好、项目上下文、反复出现的业务规则、上次未完事项或用户问“之前/上次/以后”时，先查 memory，再回答。不要把一次性闲聊、敏感凭据、支付信息或无关个人隐私写入 memory。',
+      `- 记忆文件位于 \`${memoriesDir}\`；只有在用户明确要求记忆或信息显然属于长期偏好/项目事实时才沉淀。`,
+    ].join('\n');
   }
 
   _threadStartParams() {

@@ -1,6 +1,5 @@
 ---
 name: PPT大纲
-title: PPT大纲
 description: 根据主题生成结构化的演示文稿大纲，逐页给出标题、要点与讲述建议，可直接用于制作 PPT。
 ---
 

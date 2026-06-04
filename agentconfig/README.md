@@ -2,7 +2,8 @@
 
 本目录收录面向**国内用户**（工作 + 生活）的一整套 agent 配置：内置技能（skills）、
 MCP 工具、角色（subagents）与行为准则（rules）。目标是让用户**安装即用、免配置**——
-常用能力开箱即得，无需自行下载或编写技能。
+常用能力开箱即得，无需自行下载或编写技能；对话中需要新能力时，agent 会优先自动查找本地
+skills，再按 `find-skills` 流程搜索可信来源并在用户确认后安装。
 
 > 所有 MCP 服务器均通过 `npx` / `uvx` / `docker` 在首次运行时自动拉取，**用户无需手动安装**。
 
@@ -19,7 +20,8 @@ agentconfig/
 ## 一、技能 skills/
 
 技能为 Anthropic 风格的 `SKILL.md`（frontmatter 仅 `name` / `title` / `description`），
-与内置 agent runtime 兼容。桌面端会自动将其复制到独立 agent home 的 `skills/`，对话中按需触发。
+与内置 agent runtime 兼容。桌面端会自动将其复制到独立 agent home 的 `skills/`，对话中按需触发；
+前端不展示手动技能栏。
 
 | 目录 | 技能 | 说明 |
 |------|------|------|
@@ -39,6 +41,10 @@ agentconfig/
 | `excel-helper` | 表格助手 | Excel/WPS 公式、函数与透视表方案，可配合数据分析。 |
 | `travel-planner` | 出行规划 | 结合高德/12306/飞常准查询路线、车次、航班并生成行程。 |
 | `contract-review` | 合同审阅 | 识别合同风险点与缺失条款（非正式法律意见）。 |
+| `find-skills` | 技能发现 | 当本地没有合适能力时，搜索、评估并按用户确认安装外部 skill。 |
+
+对话中如果用户明确要求“记住这个流程 / 做成技能 / 以后都这样”，agent 可以把稳定主题流程写入
+`agent-home/skills/<slug>/SKILL.md`。该目录已加入运行时可写根，后续会话会自动扫描并按需触发。
 
 ## 二、MCP 工具 mcp/
 
@@ -66,10 +72,11 @@ agentconfig/
 
 ## 集成建议
 
-1. **技能**：桌面端启动时整体安装 `agentconfig/`，内置技能会自动出现在 agent home 的 `skills/`。
-2. **MCP**：桌面端启动时自动把 `mcp/*.toml` 合并进 agent home 的 `config.toml`，并替换工作区路径占位符。
-3. **准则**：桌面端启动时自动把 `rules/*.md` 合并进 agent home 的 `AGENTS.md`。
-4. **角色**：在 UI 中做成「切换角色」按钮，点击即把对应角色正文作为前置提示发送。
+1. **技能**：桌面端启动时整体安装 `agentconfig/`，内置技能会自动出现在 agent home 的 `skills/`，由 agent 自动选择。
+2. **动态技能**：对话中沉淀的主题 skill 写入 agent home 的 `skills/<slug>/SKILL.md`，跨会话保留。
+3. **MCP**：桌面端启动时自动把 `mcp/*.toml` 合并进 agent home 的 `config.toml`，并替换工作区路径占位符；默认 core profile 也会开启持久化 memory。
+4. **准则**：桌面端启动时自动把 `rules/*.md` 合并进 agent home 的 `AGENTS.md`，并追加技能发现、动态 skill 与跨 session memory 规则。
+5. **角色**：在 UI 中做成「切换角色」按钮，点击即把对应角色正文作为前置提示发送。
 
 ## 来源与可信度
 

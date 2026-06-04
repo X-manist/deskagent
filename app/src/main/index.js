@@ -323,22 +323,6 @@ function installBundledAgentConfig() {
   }
 }
 
-function listSkills() {
-  const dir = path.join(paths.agentHome, 'skills');
-  const out = [];
-  if (!fs.existsSync(dir)) return out;
-  for (const name of fs.readdirSync(dir)) {
-    const md = path.join(dir, name, 'SKILL.md');
-    if (fs.existsSync(md)) {
-      const text = fs.readFileSync(md, 'utf8');
-      const descMatch = text.match(/description:\s*"?([^"\n]+)"?/i);
-      const titleMatch = text.match(/title:\s*"?([^"\n]+)"?/i) || text.match(/name:\s*"?([^"\n]+)"?/i);
-      out.push({ id: name, title: (titleMatch && titleMatch[1]) || name, description: (descMatch && descMatch[1]) || '' });
-    }
-  }
-  return out;
-}
-
 function wireEngineEvents() {
   const fwd = (channel) => (payload) => sendToWindow(channel, payload);
   engine.on('status', fwd('engine:status'));
@@ -446,7 +430,6 @@ function createWindow() {
 ipcMain.handle('app:bootstrap', async () => {
   return {
     settings: { ...getSettings(), apiKey: getSettings().apiKey ? '••••••••' : '' },
-    skills: listSkills(),
     paths: { workspaceDir: paths.workspaceDir },
     currentThreadId: engine && engine.threadId,
     auth: { loggedIn: isLoggedIn(), phone: auth.phone },
