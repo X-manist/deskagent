@@ -61,9 +61,11 @@ jobs:
           if (!$pkg) {
             throw "Failed to download @openai/codex Windows native package"
           }
+          New-Item -ItemType Directory -Force -Path .ci/windows-runtime | Out-Null
           New-Item -ItemType Directory -Force -Path app/resources/bin | Out-Null
           tar -xzf $pkg.FullName
-          Copy-Item package/vendor/x86_64-pc-windows-msvc/bin/codex.exe app/resources/bin/deskagent-core.exe
+          Copy-Item package/vendor/x86_64-pc-windows-msvc/bin/codex.exe .ci/windows-runtime/deskagent-core.exe
+          Copy-Item .ci/windows-runtime/deskagent-core.exe app/resources/bin/deskagent-core.exe
           Copy-Item package/vendor/x86_64-pc-windows-msvc/codex-package.json app/resources/codex-package.json
           if (Test-Path app/resources/codex-resources) {
             Remove-Item -Recurse -Force app/resources/codex-resources
@@ -73,7 +75,7 @@ jobs:
           }
           Copy-Item -Recurse package/vendor/x86_64-pc-windows-msvc/codex-resources app/resources/codex-resources
           Copy-Item -Recurse package/vendor/x86_64-pc-windows-msvc/codex-path app/resources/codex-path
-          Get-Item app/resources/bin/deskagent-core.exe | Select-Object FullName, Length
+          Get-Item .ci/windows-runtime/deskagent-core.exe, app/resources/bin/deskagent-core.exe | Select-Object FullName, Length
 
       - name: Build OS helper
         working-directory: native/os-tools
@@ -85,19 +87,38 @@ jobs:
       - name: Verify Windows binaries
         shell: pwsh
         run: |
-          $bins = @(
-            "core/codex/codex-rs/target/release/deskagent-core.exe",
+          $required = @(
+            ".ci/windows-runtime/deskagent-core.exe",
+            "native/os-tools/target/release/deskagent-os-tools.exe",
+            "server/target/release/deskagent-server.exe",
+            "app/resources/codex-package.json",
+            "app/resources/codex-resources/codex-command-runner.exe",
+            "app/resources/codex-path/rg.exe"
+          )
+          foreach ($path in $required) {
+            if (!(Test-Path $path)) {
+              throw "Missing Windows build input: $path"
+            }
+          }
+
+          $exeFiles = @(
+            ".ci/windows-runtime/deskagent-core.exe",
             "native/os-tools/target/release/deskagent-os-tools.exe",
             "server/target/release/deskagent-server.exe"
           )
-          foreach ($bin in $bins) {
-            if (!(Test-Path $bin)) {
-              throw "Missing Windows binary: $bin"
+          foreach ($exe in $exeFiles) {
+            $magic = [System.IO.File]::ReadAllBytes((Resolve-Path $exe))
+            if ($magic[0] -ne 0x4d -or $magic[1] -ne 0x5a) {
+              throw "Not a Windows PE executable: $exe"
             }
           }
 
       - name: Build Windows installer
         working-directory: app
+        env:
+          DESKAGENT_RUNTIME_BIN: ${{ github.workspace }}\.ci\windows-runtime\deskagent-core.exe
+          DESKAGENT_OS_TOOLS_BIN: ${{ github.workspace }}\native\os-tools\target\release\deskagent-os-tools.exe
+          DESKAGENT_SERVER_BIN: ${{ github.workspace }}\server\target\release\deskagent-server.exe
         run: npm run dist:win
 
       - name: List release outputs
