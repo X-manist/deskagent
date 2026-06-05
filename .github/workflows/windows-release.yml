@@ -53,12 +53,27 @@ jobs:
         working-directory: app
         run: npm ci
 
-      - name: Build agent runtime
-        working-directory: core/codex/codex-rs
+      - name: Bundle agent runtime
         shell: pwsh
         run: |
-          cargo build --release -p codex-cli --bin codex
-          Copy-Item target/release/codex.exe target/release/deskagent-core.exe
+          npm pack @openai/codex@0.137.0-win32-x64 --silent
+          $pkg = Get-ChildItem -Filter "openai-codex-*-win32-x64.tgz" | Select-Object -First 1
+          if (!$pkg) {
+            throw "Failed to download @openai/codex Windows native package"
+          }
+          New-Item -ItemType Directory -Force -Path app/resources/bin | Out-Null
+          tar -xzf $pkg.FullName
+          Copy-Item package/vendor/x86_64-pc-windows-msvc/bin/codex.exe app/resources/bin/deskagent-core.exe
+          Copy-Item package/vendor/x86_64-pc-windows-msvc/codex-package.json app/resources/codex-package.json
+          if (Test-Path app/resources/codex-resources) {
+            Remove-Item -Recurse -Force app/resources/codex-resources
+          }
+          if (Test-Path app/resources/codex-path) {
+            Remove-Item -Recurse -Force app/resources/codex-path
+          }
+          Copy-Item -Recurse package/vendor/x86_64-pc-windows-msvc/codex-resources app/resources/codex-resources
+          Copy-Item -Recurse package/vendor/x86_64-pc-windows-msvc/codex-path app/resources/codex-path
+          Get-Item app/resources/bin/deskagent-core.exe | Select-Object FullName, Length
 
       - name: Build OS helper
         working-directory: native/os-tools
