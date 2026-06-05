@@ -12,21 +12,16 @@ const { createWorkspaceCheckpoint, rollbackWorkspace } = require('./workspace');
 
 loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 
-const DEFAULT_CLOUD_BACKEND_URLS = [
-  'https://admin-deskagent.debinxiang.top',
-  'https://admin-deskagent.agentsworkforyou.cn',
-  'https://compinfo.debinxiang.top/deskagent',
-];
-const DEFAULT_CLOUD_BACKEND_URL = DEFAULT_CLOUD_BACKEND_URLS[0];
+const DEFAULT_CLOUD_BACKEND_URL = 'http://admin-deskagent.debinxiang.top/';
 
 // The metering/auth backend (deskagent-server). The desktop never holds the real
 // upstream key: it authenticates the member's JWT here and the backend forwards
 // to the real relay while metering token usage.
 const defaultBackendUrl = app.isPackaged ? DEFAULT_CLOUD_BACKEND_URL : 'http://127.0.0.1:8787';
 function backendUrlCandidates() {
-  const raw = process.env.DESKAGENT_BACKEND_URLS
-    || process.env.DESKAGENT_BACKEND_URL
-    || (app.isPackaged ? DEFAULT_CLOUD_BACKEND_URLS.join(',') : defaultBackendUrl);
+  const raw = process.env.DESKAGENT_BACKEND_URL
+    || process.env.DESKAGENT_BACKEND_URLS
+    || defaultBackendUrl;
   const urls = String(raw)
     .split(/[,\s]+/)
     .map((value) => value.trim().replace(/\/+$/, ''))
@@ -217,8 +212,9 @@ async function ensureLocalBackend() {
 async function prepareEngineSettings() {
   directRelayFallbackActive = false;
   if (!isLoggedIn()) return;
-  await resolveBackendUrl();
+  const resolvedBackendUrl = await resolveBackendUrl();
   await refreshMemberModelSetting();
+  if (!isLocalBackendUrl(resolvedBackendUrl) && await backendAvailable(1200, resolvedBackendUrl)) return;
   if (await ensureLocalBackend()) return;
 
   // Development/internal-test safety net: when the configured member backend is

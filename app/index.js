@@ -13,7 +13,8 @@ loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 // The metering/auth backend (deskagent-server). The desktop never holds the real
 // upstream key: it authenticates the member's JWT here and the backend forwards
 // to the real relay while metering token usage.
-const BACKEND_URL = (process.env.DESKAGENT_BACKEND_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
+const packagedBackendUrl = 'http://admin-deskagent.debinxiang.top/';
+const BACKEND_URL = (process.env.DESKAGENT_BACKEND_URL || (app.isPackaged ? packagedBackendUrl : 'http://127.0.0.1:8787')).replace(/\/+$/, '');
 
 const DEFAULT_SETTINGS = {
   // Production default points at the team relay (OpenAI-compatible gateway).
