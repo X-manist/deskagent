@@ -31,6 +31,8 @@ const rollbackWorkspaceBtn = $('#rollbackWorkspace');
 const workspaceHint = $('#workspaceHint');
 const settingsModel = $('#settingsModel');
 const settingsWorkspace = $('#settingsWorkspace');
+const settingsAgentConfig = $('#settingsAgentConfig');
+const updateAgentConfigBtn = $('#updateAgentConfig');
 
 let attachments = [];
 const THEME_STORAGE_KEY = 'deskagent.themeMode';
@@ -56,6 +58,7 @@ let urlDownloading = false;
 let currentWorkspaceDir = '';
 let currentModel = '';
 let availableModels = [];
+let agentConfigUpdating = false;
 
 function basename(value) {
   return String(value || '').split(/[\\/]/).filter(Boolean).pop() || value || '';
@@ -113,6 +116,48 @@ function renderSettingsSummary() {
   if (settingsWorkspace) {
     settingsWorkspace.textContent = currentWorkspaceDir ? basename(currentWorkspaceDir) : '默认工作区';
     settingsWorkspace.title = currentWorkspaceDir || '';
+  }
+}
+
+function shortCommit(value) {
+  return String(value || '').slice(0, 7);
+}
+
+function renderAgentConfigStatus(status) {
+  if (!settingsAgentConfig) return;
+  if (!status) {
+    settingsAgentConfig.textContent = '尚未同步';
+    return;
+  }
+  if (status.ok && status.commit) {
+    settingsAgentConfig.textContent = `已同步 ${shortCommit(status.commit)}`;
+  } else if (status.ok && status.skipped) {
+    settingsAgentConfig.textContent = status.reason === 'disabled' ? '未启用远程更新' : '无需更新';
+  } else {
+    settingsAgentConfig.textContent = status.error ? `同步失败：${status.error}` : '同步失败';
+  }
+  settingsAgentConfig.title = status.updatedAt || '';
+}
+
+async function updateAgentConfigNow() {
+  if (!window.api.agentConfig || !window.api.agentConfig.update || agentConfigUpdating) return;
+  agentConfigUpdating = true;
+  if (updateAgentConfigBtn) {
+    updateAgentConfigBtn.disabled = true;
+    updateAgentConfigBtn.textContent = '更新中…';
+  }
+  try {
+    const status = await window.api.agentConfig.update();
+    renderAgentConfigStatus(status);
+    showSystemNotice(status && status.ok ? '能力配置已更新' : '能力配置更新失败');
+  } catch (e) {
+    renderAgentConfigStatus({ ok: false, error: (e && e.message) || '更新失败' });
+  } finally {
+    agentConfigUpdating = false;
+    if (updateAgentConfigBtn) {
+      updateAgentConfigBtn.disabled = false;
+      updateAgentConfigBtn.textContent = '更新能力配置';
+    }
   }
 }
 
@@ -718,6 +763,9 @@ if (urlModal) {
     if (e.target === urlModal) closeUrlAttachmentModal();
   });
 }
+if (updateAgentConfigBtn) {
+  updateAgentConfigBtn.addEventListener('click', updateAgentConfigNow);
+}
 
 // Attachments: drag & drop files/directories onto the window
 window.addEventListener('dragover', (e) => {
@@ -964,6 +1012,8 @@ window.api.on('workspace:changed', (p) => {
   refreshSessions();
 });
 
+window.api.on('agentconfig:status', renderAgentConfigStatus);
+
 // Bootstrap
 (async () => {
   const info = await window.api.bootstrap();
@@ -973,6 +1023,7 @@ window.api.on('workspace:changed', (p) => {
     activeId = info.currentThreadId;
   }
   setModelTag(info.settings);
+  renderAgentConfigStatus(info.agentConfig);
   showWelcome();
 })();
 

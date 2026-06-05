@@ -23,6 +23,10 @@ contextBridge.exposeInMainWorld('api', {
   createWorkspaceCheckpoint: (label) => ipcRenderer.invoke('app:createWorkspaceCheckpoint', label),
   rollbackWorkspace: () => ipcRenderer.invoke('app:rollbackWorkspace'),
   setModel: (model) => ipcRenderer.invoke('settings:setModel', model),
+  agentConfig: {
+    status: () => ipcRenderer.invoke('agentconfig:status'),
+    update: () => ipcRenderer.invoke('agentconfig:update'),
+  },
   remote: {
     status: () => ipcRenderer.invoke('remote:status'),
     refreshPairing: () => ipcRenderer.invoke('remote:refreshPairing'),
@@ -53,6 +57,7 @@ contextBridge.exposeInMainWorld('api', {
       'remote:state',
       'settings:updated',
       'workspace:changed',
+      'agentconfig:status',
     ];
     if (allowed.includes(channel)) ipcRenderer.on(channel, (_e, payload) => cb(payload));
   },

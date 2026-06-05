@@ -24,6 +24,7 @@
 - 一键打开工作目录
 - 会员套餐控制模型、积分、计费倍率和价格；桌面端不暴露手动 API 配置
 - `agentconfig/` 整体同步到独立 agent home（不再只有 skills）
+- `agentconfig/` 支持从远程 Git 仓库自动更新，用户无需重新安装即可获得新的内置 skills / rules
 - 默认按 `agentconfig/skills/find-skills` 规则自动查找本地技能、按需联网搜索/安装技能
 - 支持把用户确认的稳定主题流程写入 `agent-home/skills/<slug>/SKILL.md`，后续会话自动触发
 - 已开启跨 session memory，长期偏好和项目事实沉淀在 `agent-home/memories/`
@@ -67,6 +68,16 @@ npm start
 `.env` 示例见：`/.env.example`
 
 默认 `DESKAGENT_MCP_PROFILE=core`，不自动加载 Playwright、地图、GitHub 等第三方 MCP 示例。开发调试时可改成 `DESKAGENT_MCP_PROFILE=full`，应用会把 `agentconfig/mcp/*.toml` 合并进运行配置。
+
+### AgentConfig 远程更新
+
+桌面端启动时会先安装打包内置的 `agentconfig/`，再尝试从远程 Git 仓库拉取最新配置并同步到用户的 `agent-home`。默认源是当前仓库：
+
+- `DESKAGENT_AGENTCONFIG_REPO=https://github.com/X-manist/deskagent.git`
+- `DESKAGENT_AGENTCONFIG_REF=main`
+- `DESKAGENT_AGENTCONFIG_SUBDIR=agentconfig`
+
+可以把这些环境变量指向独立的 `deskagent-agentconfig` 仓库；设置 `DESKAGENT_AGENTCONFIG_UPDATE=false` 可关闭远程更新。同步使用 hash manifest，只覆盖应用管理过的文件；用户本地改动和对话中动态沉淀的 `agent-home/skills/<slug>/SKILL.md` 会被保留。
 
 远程连接不再依赖公网中转服务。桌面端会在本机开启一个随机端口的加密直连页面，二维码里包含局域网/VPN 地址、一次性连接码和一次性密钥；手机或浏览器需要与桌面处于同一 Wi-Fi、VPN，或能直接访问这台电脑的内网 IP。跨 NAT 的公网访问仍应通过 VPN、内网穿透或系统网络能力解决，应用本身不会把远程命令发到公网业务服务器。
 

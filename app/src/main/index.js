@@ -9,6 +9,12 @@ const { LocalBridge } = require('./bridge');
 const { RemoteHost } = require('./remote');
 const { downloadUrlAttachment, importLocalAttachments } = require('./attachments');
 const { createWorkspaceCheckpoint, rollbackWorkspace } = require('./workspace');
+const {
+  installAgentConfigFromDir,
+  readAgentConfigStatus,
+  remoteAgentConfigSettings,
+  updateAgentConfigFromGit,
+} = require('./agentconfig-updater');
 
 loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 
@@ -93,6 +99,8 @@ let directRelayFallbackActive = false;
 let backendProc = null;
 let backendStartPromise = null;
 let memberModelsCache = [];
+let agentConfigUpdateTimer = null;
+let agentConfigUpdatePromise = null;
 
 function loadAuth() {
   try {
@@ -293,6 +301,20 @@ function sendToWindow(channel, payload) {
   if (canSendToWindow()) win.webContents.send(channel, payload);
 }
 
+function agentConfigSourceDir() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'agentconfig')
+    : path.join(__dirname, '..', '..', '..', 'agentconfig');
+}
+
+function agentConfigCacheDir() {
+  return path.join(paths.base, 'agentconfig-remote');
+}
+
+function logAgentConfig(message) {
+  sendToWindow('engine:log', { src: 'agentconfig', msg: message });
+}
+
 function wireRemoteEvents() {
   if (!remoteHost) return;
   remoteHost.on('state', (payload) => sendToWindow('remote:state', payload));
@@ -421,14 +443,60 @@ async function restartEngineForSettings() {
 // Copy bundled agent configuration into the dedicated runtime home.
 // This includes skills plus MCP/rules/subagents shipped by the app.
 function installBundledAgentConfig() {
-  const src = app.isPackaged
-    ? path.join(process.resourcesPath, 'agentconfig')
-    : path.join(__dirname, '..', '..', '..', 'agentconfig');
-  if (fs.existsSync(src)) {
-    for (const name of fs.readdirSync(src)) {
-      fs.cpSync(path.join(src, name), path.join(paths.agentHome, name), { recursive: true });
+  return installAgentConfigFromDir({
+    sourceDir: agentConfigSourceDir(),
+    agentHome: paths.agentHome,
+    source: 'bundled',
+    log: logAgentConfig,
+  });
+}
+
+async function updateAgentConfigNow({ restart = false } = {}) {
+  if (agentConfigUpdatePromise) return agentConfigUpdatePromise;
+  const settings = remoteAgentConfigSettings(process.env);
+  if (!settings.enabled) return readAgentConfigStatus(paths.agentHome);
+  agentConfigUpdatePromise = (async () => {
+    const status = await updateAgentConfigFromGit({
+      agentHome: paths.agentHome,
+      cacheDir: agentConfigCacheDir(),
+      env: process.env,
+      log: logAgentConfig,
+    });
+    sendToWindow('agentconfig:status', status);
+    if (restart && status && status.ok && engine) {
+      await restartEngineForSettings();
     }
+    return status;
+  })();
+  try {
+    return await agentConfigUpdatePromise;
+  } finally {
+    agentConfigUpdatePromise = null;
   }
+}
+
+async function initializeAgentConfig() {
+  installBundledAgentConfig();
+  const settings = remoteAgentConfigSettings(process.env);
+  if (!settings.enabled) {
+    return readAgentConfigStatus(paths.agentHome);
+  }
+  const update = updateAgentConfigNow();
+  const timeout = new Promise((resolve) => {
+    setTimeout(() => resolve(readAgentConfigStatus(paths.agentHome)), settings.startupWaitMs);
+  });
+  return Promise.race([update, timeout]);
+}
+
+function scheduleAgentConfigUpdates() {
+  const settings = remoteAgentConfigSettings(process.env);
+  if (!settings.enabled || agentConfigUpdateTimer) return;
+  agentConfigUpdateTimer = setInterval(() => {
+    updateAgentConfigNow({ restart: false }).catch((error) => {
+      logAgentConfig(`远程 agentconfig 定时更新失败：${error.message}`);
+    });
+  }, settings.intervalMs);
+  if (agentConfigUpdateTimer.unref) agentConfigUpdateTimer.unref();
 }
 
 function wireEngineEvents() {
@@ -547,8 +615,13 @@ ipcMain.handle('app:bootstrap', async () => {
     currentThreadId: engine && engine.threadId,
     auth: { loggedIn: isLoggedIn(), phone: auth.phone },
     remote: remoteHost ? remoteHost.info() : null,
+    agentConfig: readAgentConfigStatus(paths.agentHome),
   };
 });
+
+ipcMain.handle('agentconfig:status', async () => readAgentConfigStatus(paths.agentHome));
+
+ipcMain.handle('agentconfig:update', async () => updateAgentConfigNow({ restart: true }));
 
 // ---- Auth / membership IPC (talks to deskagent-server) ----
 ipcMain.handle('auth:status', async () => ({ loggedIn: isLoggedIn(), phone: auth.phone }));
@@ -724,7 +797,8 @@ ipcMain.handle('remote:refreshPairing', async () => {
 
 app.whenReady().then(async () => {
   paths = setupPaths();
-  installBundledAgentConfig();
+  await initializeAgentConfig();
+  scheduleAgentConfigUpdates();
   await startBridge();
   createRemoteHost();
   createWindow();

@@ -73,10 +73,11 @@ agentconfig/
 ## 集成建议
 
 1. **技能**：桌面端启动时整体安装 `agentconfig/`，内置技能会自动出现在 agent home 的 `skills/`，由 agent 自动选择。
-2. **动态技能**：对话中沉淀的主题 skill 写入 agent home 的 `skills/<slug>/SKILL.md`，跨会话保留。
-3. **MCP**：桌面端启动时自动把 `mcp/*.toml` 合并进 agent home 的 `config.toml`，并替换工作区路径占位符；默认 core profile 也会开启持久化 memory。
-4. **准则**：桌面端启动时自动把 `rules/*.md` 合并进 agent home 的 `AGENTS.md`，并追加技能发现、动态 skill 与跨 session memory 规则。
-5. **角色**：在 UI 中做成「切换角色」按钮，点击即把对应角色正文作为前置提示发送。
+2. **远程更新**：桌面端启动时会尝试从 Git 仓库拉取最新 `agentconfig/`，默认源为 `https://github.com/X-manist/deskagent.git` 的 `main:agentconfig`。可用环境变量覆盖：`DESKAGENT_AGENTCONFIG_REPO`、`DESKAGENT_AGENTCONFIG_REF`、`DESKAGENT_AGENTCONFIG_SUBDIR`，或用 `DESKAGENT_AGENTCONFIG_UPDATE=false` 关闭。更新只覆盖由应用管理的文件；用户本地改动和动态生成的 skills 会被保留。
+3. **动态技能**：对话中沉淀的主题 skill 写入 agent home 的 `skills/<slug>/SKILL.md`，跨会话保留。
+4. **MCP**：桌面端启动时自动把 `mcp/*.toml` 合并进 agent home 的 `config.toml`，并替换工作区路径占位符；默认 core profile 也会开启持久化 memory。
+5. **准则**：桌面端启动时自动把 `rules/*.md` 合并进 agent home 的 `AGENTS.md`，并追加技能发现、动态 skill 与跨 session memory 规则。
+6. **角色**：在 UI 中做成「切换角色」按钮，点击即把对应角色正文作为前置提示发送。
 
 ## 来源与可信度
 

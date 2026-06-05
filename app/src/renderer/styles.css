@@ -1428,6 +1428,22 @@ button {
   text-align: right;
 }
 
+.settings-action-row > div {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.settings-action-row strong {
+  flex: 1 1 auto;
+}
+
+.settings-action-row .mini-btn {
+  flex: 0 0 auto;
+}
+
 .modal-card input,
 .login-card input {
   width: 100%;
