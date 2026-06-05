@@ -22,7 +22,7 @@ function Login({ onLogin }) {
   return (
     <div className="login-wrap">
       <div className="login-card">
-        <h1>智界助手 · 管理后台</h1>
+        <h1>DeskAgent 桌面助手 · 管理后台</h1>
         <div className="field">
           <label>管理员账号</label>
           <input value={username} onChange={(e) => setUsername(e.target.value)} />
@@ -342,7 +342,7 @@ function Shell({ onLogout }) {
   return (
     <div className="layout">
       <div className="sidebar">
-        <div className="brand">智界助手</div>
+        <div className="brand">DeskAgent 管理后台</div>
         {TABS.map((t) => (
           <div key={t.id} className={`nav-item ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
