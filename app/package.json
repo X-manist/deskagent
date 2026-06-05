@@ -69,7 +69,7 @@
         "zip"
       ],
       "category": "public.app-category.productivity",
-      "artifactName": "智界桌面助手-${version}-${arch}.${ext}",
+      "artifactName": "deskagent-${version}-${arch}.${ext}",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
