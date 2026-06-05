@@ -98,6 +98,15 @@ CREATE TABLE IF NOT EXISTS usage_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_sessions(user_id);
 
+-- Admin-overridden model pricing. Config/env values are defaults; rows here
+-- take precedence immediately without requiring a server restart.
+CREATE TABLE IF NOT EXISTS model_pricing (
+  model_id         TEXT PRIMARY KEY,
+  point_multiplier REAL NOT NULL,
+  updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by       TEXT
+);
+
 CREATE TABLE IF NOT EXISTS admins (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   username      TEXT NOT NULL UNIQUE,

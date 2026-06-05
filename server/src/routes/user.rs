@@ -6,6 +6,7 @@ use serde_json::json;
 
 use crate::auth::{issue_user_token, AuthUser};
 use crate::error::{AppError, AppResult};
+use crate::models;
 use crate::sms;
 use crate::state::AppState;
 
@@ -274,16 +275,22 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
     allowed_models.dedup();
     let allowed_models = allowed_models
         .into_iter()
-        .filter_map(|id| {
-            st.cfg.model(&id).map(|model| {
-                json!({
-                    "id": model.id,
-                    "name": model.display_name,
-                    "display_name": model.display_name,
-                    "provider": model.provider,
-                    "configured": !model.api_key.trim().is_empty(),
-                    "point_multiplier": model.point_multiplier,
-                })
+        .filter_map(|id| st.cfg.model(&id))
+        .collect::<Vec<_>>();
+    let pricing = models::multiplier_overrides(&st.db).await?;
+    let allowed_models = allowed_models
+        .into_iter()
+        .map(|mut model| {
+            if let Some(multiplier) = pricing.get(&model.id).copied() {
+                model.point_multiplier = multiplier;
+            }
+            json!({
+                "id": model.id,
+                "name": model.display_name,
+                "display_name": model.display_name,
+                "provider": model.provider,
+                "configured": !model.api_key.trim().is_empty(),
+                "point_multiplier": model.point_multiplier,
             })
         })
         .collect::<Vec<_>>();
@@ -308,7 +315,7 @@ async fn me(State(st): State<AppState>, user: AuthUser) -> AppResult<Json<serde_
 
 async fn models(State(st): State<AppState>) -> AppResult<Json<serde_json::Value>> {
     Ok(Json(json!({
-        "models": st.cfg.public_models(),
+        "models": models::public_models(&st.cfg, &st.db).await?,
         "default_model": st.cfg.default_model,
     })))
 }

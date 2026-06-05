@@ -8,6 +8,7 @@ use crate::auth::{issue_admin_token, issue_user_token, AuthAdmin};
 use crate::crypto;
 use crate::db;
 use crate::error::{AppError, AppResult};
+use crate::models;
 use crate::state::AppState;
 
 fn parse_models_json(raw: &str, fallback: &str) -> Vec<String> {
@@ -65,7 +66,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin/api/login", post(login))
         .route("/admin/api/stats", get(stats))
-        .route("/admin/api/models", get(list_models))
+        .route(
+            "/admin/api/models",
+            get(list_models).put(update_model_pricing),
+        )
         .route("/admin/api/users", get(list_users))
         .route("/admin/api/test-users", post(create_test_user))
         .route("/admin/api/orders", get(list_orders))
@@ -140,7 +144,81 @@ async fn list_models(
     _a: AuthAdmin,
 ) -> AppResult<Json<serde_json::Value>> {
     Ok(Json(json!({
-        "models": st.cfg.public_models(),
+        "models": models::public_models(&st.cfg, &st.db).await?,
+        "default_model": st.cfg.default_model,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ModelPricingItem {
+    id: String,
+    point_multiplier: f64,
+}
+
+#[derive(Deserialize)]
+struct ModelPricingReq {
+    models: Vec<ModelPricingItem>,
+}
+
+async fn update_model_pricing(
+    State(st): State<AppState>,
+    a: AuthAdmin,
+    Json(req): Json<ModelPricingReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    if req.models.is_empty() {
+        return Err(AppError::bad("模型倍率列表不能为空"));
+    }
+    let mut changed = Vec::new();
+    let mut tx = st.db.begin().await?;
+    for item in req.models {
+        let id = item.id.trim().to_string();
+        if id.is_empty() {
+            return Err(AppError::bad("模型 ID 不能为空"));
+        }
+        let default_cfg = st
+            .cfg
+            .model(&id)
+            .ok_or_else(|| AppError::bad(format!("模型未开放或不存在: {id}")))?;
+        if !item.point_multiplier.is_finite() || item.point_multiplier <= 0.0 {
+            return Err(AppError::bad(format!("{} 的积分倍率必须大于 0", id)));
+        }
+        if item.point_multiplier > 1000.0 {
+            return Err(AppError::bad(format!("{} 的积分倍率过大", id)));
+        }
+        if (item.point_multiplier - default_cfg.point_multiplier).abs() < 0.000_000_001 {
+            sqlx::query("DELETE FROM model_pricing WHERE model_id = ?")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            changed.push(format!("{}=default", id));
+        } else {
+            sqlx::query(
+                "INSERT INTO model_pricing (model_id, point_multiplier, updated_at, updated_by)
+                 VALUES (?, ?, datetime('now'), ?)
+                 ON CONFLICT(model_id) DO UPDATE SET
+                   point_multiplier = excluded.point_multiplier,
+                   updated_at = datetime('now'),
+                   updated_by = excluded.updated_by",
+            )
+            .bind(&id)
+            .bind(item.point_multiplier)
+            .bind(&a.0.username)
+            .execute(&mut *tx)
+            .await?;
+            changed.push(format!("{}={}", id, item.point_multiplier));
+        }
+    }
+    tx.commit().await?;
+    db::audit(
+        &st.db,
+        &a.0.username,
+        "update_model_pricing",
+        &changed.join(", "),
+    )
+    .await;
+    Ok(Json(json!({
+        "ok": true,
+        "models": models::public_models(&st.cfg, &st.db).await?,
         "default_model": st.cfg.default_model,
     })))
 }

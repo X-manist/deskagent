@@ -11,6 +11,7 @@ use serde_json::json;
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::meter;
+use crate::models;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -98,9 +99,8 @@ async fn forward_metered(
     let json_body: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| AppError::bad("请求体不是合法 JSON"))?;
     let model = extract_model(&json_body, &st.cfg.default_model);
-    let model_cfg = st
-        .cfg
-        .model(&model)
+    let model_cfg = models::model_with_pricing(&st.cfg, &st.db, &model)
+        .await?
         .ok_or_else(|| AppError::bad(format!("模型未开放或不存在: {model}")))?;
     if model_cfg.api_key.trim().is_empty() {
         return Err(AppError::new(
@@ -315,7 +315,20 @@ async fn handle_chat_ws(mut socket: WebSocket, st: AppState, user: AuthUser) {
         }
     };
     let model = extract_model(&json_body, &st.cfg.default_model);
-    let model_cfg = match st.cfg.model(&model) {
+    let model_cfg = match models::model_with_pricing(&st.cfg, &st.db, &model).await {
+        Ok(model) => model,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(
+                    json!({"type":"error","error":{"message": e.message}})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let model_cfg = match model_cfg {
         Some(cfg) => cfg,
         None => {
             let _ = socket

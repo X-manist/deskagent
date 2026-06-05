@@ -52,15 +52,20 @@ function useAdminModels() {
   const [models, setModels] = useState([]);
   const [defaultModel, setDefaultModel] = useState('');
   const [err, setErr] = useState('');
+  const load = () => api('/admin/api/models')
+    .then((r) => {
+      setModels(Array.isArray(r.models) ? r.models : []);
+      setDefaultModel(r.default_model || (r.models && r.models[0] && r.models[0].id) || '');
+      return r;
+    })
+    .catch((e) => {
+      setErr(e.message);
+      throw e;
+    });
   useEffect(() => {
-    api('/admin/api/models')
-      .then((r) => {
-        setModels(Array.isArray(r.models) ? r.models : []);
-        setDefaultModel(r.default_model || (r.models && r.models[0] && r.models[0].id) || '');
-      })
-      .catch((e) => setErr(e.message));
+    load().catch(() => {});
   }, []);
-  return { models, defaultModel, err };
+  return { models, setModels, defaultModel, err, setErr, load };
 }
 
 function modelName(model) {
@@ -344,11 +349,118 @@ function Packages() {
   );
 }
 
+function ModelPricing() {
+  const { models, setModels, err, setErr, load } = useAdminModels();
+  const [values, setValues] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState('');
+
+  useEffect(() => {
+    if (!models.length) return;
+    setValues((prev) => {
+      const next = { ...prev };
+      models.forEach((model) => {
+        if (next[model.id] == null) next[model.id] = String(model.point_multiplier || 1);
+      });
+      return next;
+    });
+  }, [models]);
+
+  const setMultiplier = (id, value) => {
+    setNotice('');
+    setValues((prev) => ({ ...prev, [id]: value }));
+  };
+
+  const save = async () => {
+    setErr('');
+    setNotice('');
+    setSaving(true);
+    try {
+      const body = {
+        models: models.map((model) => {
+          const multiplier = Number(values[model.id]);
+          if (!Number.isFinite(multiplier) || multiplier <= 0) {
+            throw new Error(`${modelName(model)} 的积分倍率必须大于 0`);
+          }
+          return { id: model.id, point_multiplier: multiplier };
+        }),
+      };
+      const r = await api('/admin/api/models', { method: 'PUT', body });
+      const nextModels = Array.isArray(r.models) ? r.models : [];
+      setModels(nextModels);
+      setValues(Object.fromEntries(nextModels.map((model) => [model.id, String(model.point_multiplier || 1)])));
+      setNotice('模型积分倍率已保存并立即生效');
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const resetFromServer = async () => {
+    setErr('');
+    setNotice('');
+    try {
+      const r = await load();
+      const nextModels = Array.isArray(r.models) ? r.models : [];
+      setValues(Object.fromEntries(nextModels.map((model) => [model.id, String(model.point_multiplier || 1)])));
+    } catch (_) {}
+  };
+
+  return (
+    <div>
+      <div className="panel-block">
+        <div className="model-pricing-head">
+          <div>
+            <h3>模型积分消耗比例</h3>
+            <p>这里设置的是每 1 个模型 token 消耗多少积分，保存后云端计费和客户端模型下拉会立即使用新的比例。</p>
+          </div>
+          <div className="row">
+            <button onClick={save} disabled={saving || !models.length}>{saving ? '保存中…' : '保存倍率'}</button>
+            <button className="ghost" onClick={resetFromServer} disabled={saving}>刷新</button>
+          </div>
+        </div>
+        {notice && <div className="notice">{notice}</div>}
+        {err && <div className="err">{err}</div>}
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>模型</th><th>Provider</th><th>配置状态</th><th>默认倍率</th><th>当前积分/token</th><th>来源</th>
+          </tr>
+        </thead>
+        <tbody>
+          {models.map((model) => (
+            <tr key={model.id}>
+              <td><strong>{modelName(model)}</strong><div className="muted">{model.id}</div></td>
+              <td>{model.provider}</td>
+              <td>{model.configured ? '已配置' : '未配置密钥'}</td>
+              <td>{Number(model.default_point_multiplier || model.point_multiplier || 1).toFixed(2)}</td>
+              <td>
+                <input
+                  className="pricing-input"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={values[model.id] ?? ''}
+                  onChange={(e) => setMultiplier(model.id, e.target.value)}
+                />
+              </td>
+              <td>{model.pricing_overridden ? '管理端覆盖' : '默认配置'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 const TABS = [
   { id: 'dashboard', label: '数据概览', comp: Dashboard },
   { id: 'users', label: '用户管理', comp: Users },
   { id: 'orders', label: '订单记录', comp: Orders },
   { id: 'packages', label: '套餐设置', comp: Packages },
+  { id: 'models', label: '模型计费', comp: ModelPricing },
 ];
 
 function Shell({ onLogout }) {

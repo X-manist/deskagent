@@ -84,6 +84,16 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         "TEXT NOT NULL DEFAULT '[]'",
     )
     .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS model_pricing (
+          model_id TEXT PRIMARY KEY,
+          point_multiplier REAL NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_by TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
     backfill_points(pool).await?;
     Ok(())
 }

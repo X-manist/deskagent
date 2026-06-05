@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod meter;
+pub mod models;
 pub mod routes;
 pub mod sms;
 pub mod state;

@@ -163,6 +163,25 @@ th { color: var(--muted); font-weight: 600; }
   min-width: 420px;
   flex: 1 1 420px;
 }
+.model-pricing-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+.model-pricing-head h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+.model-pricing-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.pricing-input {
+  width: 120px;
+}
 .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 h2 { margin: 0; }
 .modal-bg {
