@@ -55,7 +55,10 @@ jobs:
 
       - name: Build agent runtime
         working-directory: core/codex/codex-rs
-        run: cargo build --release -p codex-cli --bin deskagent-core
+        shell: pwsh
+        run: |
+          cargo build --release -p codex-cli --bin codex
+          Copy-Item target/release/codex.exe target/release/deskagent-core.exe
 
       - name: Build OS helper
         working-directory: native/os-tools
