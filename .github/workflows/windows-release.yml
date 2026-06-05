@@ -1,0 +1,108 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_release:
+        description: Upload the Windows installer to the GitHub release for this ref
+        type: boolean
+        default: false
+      release_tag:
+        description: Release tag to upload to when upload_to_release is enabled
+        type: string
+        default: v0.1.0
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows installer
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      DESKAGENT_TARGET_PLATFORM: win32
+      DESKAGENT_TARGET_ARCH: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            core/codex/codex-rs
+            native/os-tools
+            server
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build agent runtime
+        working-directory: core/codex/codex-rs
+        run: cargo build --release -p codex-cli --bin deskagent-core
+
+      - name: Build OS helper
+        working-directory: native/os-tools
+        run: cargo build --release
+
+      - name: Build membership server
+        run: cargo build --release --manifest-path server/Cargo.toml
+
+      - name: Verify Windows binaries
+        shell: pwsh
+        run: |
+          $bins = @(
+            "core/codex/codex-rs/target/release/deskagent-core.exe",
+            "native/os-tools/target/release/deskagent-os-tools.exe",
+            "server/target/release/deskagent-server.exe"
+          )
+          foreach ($bin in $bins) {
+            if (!(Test-Path $bin)) {
+              throw "Missing Windows binary: $bin"
+            }
+          }
+
+      - name: Build Windows installer
+        working-directory: app
+        run: npm run dist:win
+
+      - name: List release outputs
+        shell: pwsh
+        run: Get-ChildItem app/release | Select-Object Name, Length, LastWriteTime
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deskagent-windows-${{ github.ref_name }}
+          path: |
+            app/release/*setup.exe
+            app/release/*setup.exe.blockmap
+            app/release/latest.yml
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: github.event_name == 'release' || inputs.upload_to_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || inputs.release_tag || github.ref_name }}
+          overwrite_files: true
+          files: |
+            app/release/*setup.exe
+            app/release/*setup.exe.blockmap
+            app/release/latest.yml
