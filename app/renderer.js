@@ -809,9 +809,8 @@ async function refreshAccountBadge() {
     const me = await window.api.auth.me();
     const ent = (me.entitlements || []).reduce((a, e) => a + (e.tokens_remaining || 0), 0);
     if (memberEl) {
-      memberEl.textContent = ent > 0
-        ? `会员：剩余 ${ent.toLocaleString()} Token`
-        : `免费额度：剩余 ${me.free_turns_remaining} 次`;
+      const points = Number(me.points_remaining || ent || 0);
+      memberEl.textContent = `积分：剩余 ${points.toLocaleString()}`;
     }
   } catch (_) {}
 }
@@ -896,12 +895,14 @@ async function openAccount() {
     const me = await window.api.auth.me();
     const ents = me.entitlements || [];
     let html = `<div>手机号：${me.phone}</div>`;
-    html += `<div>免费额度：${me.free_turns_remaining}/${me.free_turns_total} 次</div>`;
+    html += `<div>积分余额：${Number(me.points_remaining || 0).toLocaleString()}</div>`;
     if (ents.length) {
       ents.forEach((e) => {
-        const pct = e.token_allowance ? Math.max(0, Math.min(100, (e.tokens_remaining / e.token_allowance) * 100)) : 0;
-        const multiplier = Number(e.token_multiplier || 1).toFixed(2);
-        html += `<div style="margin-top:8px">套餐(${e.model})：剩余 ${e.tokens_remaining.toLocaleString()} / ${e.token_allowance.toLocaleString()} 积分 · ${multiplier}x（至 ${e.expires_at}）`;
+        const remaining = Number(e.points_remaining || e.tokens_remaining || 0);
+        const total = Number(e.points || e.token_allowance || 0);
+        const pct = total ? Math.max(0, Math.min(100, (remaining / total) * 100)) : 0;
+        const models = Array.isArray(e.models) && e.models.length ? e.models.join(', ') : e.model;
+        html += `<div style="margin-top:8px">套餐(${models})：剩余 ${remaining.toLocaleString()} / ${total.toLocaleString()} 积分（至 ${e.expires_at}）`;
         html += `<div class="quota-bar"><span style="width:${pct}%"></span></div></div>`;
       });
     } else {
@@ -913,9 +914,10 @@ async function openAccount() {
     (packages || []).forEach((p) => {
       const row = document.createElement('div');
       row.className = 'pkg';
-      const multiplier = Number(p.token_multiplier || 1).toFixed(2);
+      const points = Number(p.points || p.total_tokens || 0);
+      const models = Array.isArray(p.models) && p.models.length ? p.models.join(', ') : p.model;
       row.innerHTML = `<div><div class="pkg-name">${p.name}</div>` +
-        `<div class="pkg-meta">${p.model} · ${p.total_tokens.toLocaleString()} 积分 · ${multiplier}x · ${p.duration_days} 天</div></div>` +
+        `<div class="pkg-meta">${models} · ${points.toLocaleString()} 积分 · ${p.duration_days} 天</div></div>` +
         `<div style="display:flex;align-items:center;gap:10px"><span class="pkg-price">¥${p.price_yuan}</span>` +
         `<button class="send-btn">购买</button></div>`;
       row.querySelector('button').addEventListener('click', () => buyPackage(p, errEl));

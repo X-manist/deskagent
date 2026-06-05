@@ -30,9 +30,37 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     .await?;
     ensure_column(
         pool,
+        "packages",
+        "points",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "packages",
+        "models_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    .await?;
+    ensure_column(
+        pool,
         "orders",
         "pkg_token_multiplier",
         "REAL NOT NULL DEFAULT 1.0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "orders",
+        "pkg_points",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "orders",
+        "pkg_models_json",
+        "TEXT NOT NULL DEFAULT '[]'",
     )
     .await?;
     ensure_column(
@@ -41,6 +69,60 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         "token_multiplier",
         "REAL NOT NULL DEFAULT 1.0",
     )
+    .await?;
+    ensure_column(
+        pool,
+        "entitlements",
+        "points",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "entitlements",
+        "models_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    .await?;
+    backfill_points(pool).await?;
+    Ok(())
+}
+
+async fn backfill_points(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "UPDATE packages
+         SET points = CASE WHEN points > 0 THEN points ELSE total_tokens END,
+             models_json = CASE
+               WHEN models_json IS NOT NULL AND models_json != '' AND models_json != '[]' THEN models_json
+               ELSE json_array(model)
+             END
+         WHERE points = 0 OR models_json IS NULL OR models_json = '' OR models_json = '[]'",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE orders
+         SET pkg_points = CASE WHEN pkg_points > 0 THEN pkg_points ELSE pkg_tokens END,
+             pkg_models_json = CASE
+               WHEN pkg_models_json IS NOT NULL AND pkg_models_json != '' AND pkg_models_json != '[]' THEN pkg_models_json
+               ELSE json_array(pkg_model)
+             END
+         WHERE pkg_points = 0 OR pkg_models_json IS NULL OR pkg_models_json = '' OR pkg_models_json = '[]'",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE entitlements
+         SET points = CASE WHEN points > 0 THEN points ELSE token_allowance END,
+             models_json = CASE
+               WHEN models_json IS NOT NULL AND models_json != '' AND models_json != '[]' THEN models_json
+               ELSE json_array(model)
+             END
+         WHERE points = 0 OR models_json IS NULL OR models_json = '' OR models_json = '[]'",
+    )
+    .execute(pool)
     .await?;
     Ok(())
 }
@@ -116,12 +198,15 @@ pub async fn bootstrap(pool: &SqlitePool, cfg: &Config) -> Result<()> {
         ];
         for (name, model, tokens, price, days, sort) in defaults {
             sqlx::query(
-                "INSERT INTO packages (name, model, total_tokens, token_multiplier, price_cents, duration_days, sort_order) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO packages (name, model, total_tokens, token_multiplier, points, models_json, price_cents, duration_days, sort_order)
+                 VALUES (?,?,?,?,?,json_array(?),?,?,?)",
             )
             .bind(name)
             .bind(model)
             .bind(tokens)
             .bind(1.0f64)
+            .bind(tokens)
+            .bind(model)
             .bind(price)
             .bind(days)
             .bind(sort)

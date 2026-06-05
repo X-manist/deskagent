@@ -9,6 +9,65 @@ use crate::error::{AppError, AppResult};
 use crate::sms;
 use crate::state::AppState;
 
+fn parse_models_json(raw: &str, fallback: &str) -> Vec<String> {
+    let mut models = serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect::<Vec<_>>();
+    if models.is_empty() && !fallback.trim().is_empty() {
+        models.push(fallback.trim().to_string());
+    }
+    models.sort();
+    models.dedup();
+    models
+}
+
+async fn grant_free_points(st: &AppState, uid: i64) -> AppResult<()> {
+    if st.cfg.free_points <= 0 {
+        return Ok(());
+    }
+    let existing_free_grants: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM entitlements WHERE user_id = ? AND order_id IS NULL")
+            .bind(uid)
+            .fetch_one(&st.db)
+            .await?;
+    if existing_free_grants > 0 {
+        return Ok(());
+    }
+    let models = st
+        .cfg
+        .free_models
+        .iter()
+        .filter(|model| st.cfg.model(model).is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let models = if models.is_empty() {
+        vec![st.cfg.default_model.clone()]
+    } else {
+        models
+    };
+    let primary = models
+        .first()
+        .cloned()
+        .unwrap_or_else(|| st.cfg.default_model.clone());
+    let models_json = serde_json::to_string(&models).unwrap_or_else(|_| format!("[\"{}\"]", primary));
+    sqlx::query(
+        "INSERT INTO entitlements (user_id, order_id, model, token_allowance, token_multiplier, points, models_json, expires_at, status)
+         VALUES (?, NULL, ?, ?, 1.0, ?, ?, datetime('now', ?), 'active')",
+    )
+    .bind(uid)
+    .bind(primary)
+    .bind(st.cfg.free_points)
+    .bind(st.cfg.free_points)
+    .bind(models_json)
+    .bind(format!("+{} days", st.cfg.free_points_duration_days))
+    .execute(&st.db)
+    .await?;
+    Ok(())
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/auth/sms/send", post(sms_send))
@@ -150,6 +209,7 @@ async fn sms_verify(
                 .bind(id)
                 .execute(&st.db)
                 .await?;
+            grant_free_points(&st, id).await?;
             (id, false)
         }
         None => {
@@ -159,6 +219,7 @@ async fn sms_verify(
             .bind(&phone)
             .fetch_one(&st.db)
             .await?;
+            grant_free_points(&st, id).await?;
             (id, true)
         }
     };
@@ -173,14 +234,14 @@ async fn sms_verify(
 }
 
 async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
-    let (phone, free_used): (String, i64) =
-        sqlx::query_as("SELECT phone, free_turns_used FROM users WHERE id = ?")
+    let phone: String =
+        sqlx::query_scalar("SELECT phone FROM users WHERE id = ?")
             .bind(uid)
             .fetch_one(&st.db)
             .await?;
 
-    let ents: Vec<(String, i64, f64, i64, String)> = sqlx::query_as(
-        "SELECT model, token_allowance, token_multiplier, tokens_used, expires_at FROM entitlements
+    let ents: Vec<(i64, String, i64, String, i64, String)> = sqlx::query_as(
+        "SELECT id, model, CASE WHEN points > 0 THEN points ELSE token_allowance END, models_json, tokens_used, expires_at FROM entitlements
          WHERE user_id = ? AND status='active' AND expires_at > datetime('now')
          ORDER BY expires_at ASC",
     )
@@ -188,28 +249,54 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
     .fetch_all(&st.db)
     .await?;
 
+    let mut allowed_models = Vec::<String>::new();
     let entitlements: Vec<serde_json::Value> = ents
         .into_iter()
-        .map(|(model, allow, multiplier, used, exp)| {
+        .map(|(id, model, points, models_json, used, exp)| {
+            let models = parse_models_json(&models_json, &model);
+            if points - used > 0 {
+                allowed_models.extend(models.iter().cloned());
+            }
             json!({
+                "id": id,
                 "model": model,
-                "token_allowance": allow,
-                "points": allow,
-                "token_multiplier": multiplier,
+                "models": models,
+                "token_allowance": points,
+                "points": points,
                 "tokens_used": used,
-                "tokens_remaining": (allow - used).max(0),
+                "tokens_remaining": (points - used).max(0),
+                "points_remaining": (points - used).max(0),
                 "expires_at": exp,
             })
         })
         .collect();
+    allowed_models.sort();
+    allowed_models.dedup();
+    let allowed_models = allowed_models
+        .into_iter()
+        .filter_map(|id| {
+            st.cfg.model(&id).map(|model| {
+                json!({
+                    "id": model.id,
+                    "name": model.display_name,
+                    "display_name": model.display_name,
+                    "provider": model.provider,
+                    "configured": !model.api_key.trim().is_empty(),
+                    "point_multiplier": model.point_multiplier,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let points_remaining: i64 = entitlements
+        .iter()
+        .map(|item| item.get("points_remaining").and_then(|v| v.as_i64()).unwrap_or(0))
+        .sum();
 
-    let free_remaining = (st.cfg.free_turns - free_used).max(0);
     Ok(json!({
         "id": uid,
         "phone": phone,
-        "free_turns_total": st.cfg.free_turns,
-        "free_turns_used": free_used,
-        "free_turns_remaining": free_remaining,
+        "points_remaining": points_remaining,
+        "allowed_models": allowed_models,
         "entitlements": entitlements,
     }))
 }
@@ -227,19 +314,20 @@ async fn models(State(st): State<AppState>) -> AppResult<Json<serde_json::Value>
 }
 
 async fn packages(State(st): State<AppState>) -> AppResult<Json<serde_json::Value>> {
-    let rows: Vec<(i64, String, String, i64, f64, i64, i64)> = sqlx::query_as(
-        "SELECT id, name, model, total_tokens, token_multiplier, price_cents, duration_days FROM packages
+    let rows: Vec<(i64, String, String, i64, String, i64, i64)> = sqlx::query_as(
+        "SELECT id, name, model, CASE WHEN points > 0 THEN points ELSE total_tokens END, models_json, price_cents, duration_days FROM packages
          WHERE active = 1 ORDER BY sort_order ASC, id ASC",
     )
     .fetch_all(&st.db)
     .await?;
     let list: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(id, name, model, tokens, multiplier, price, days)| {
+        .map(|(id, name, model, points, models_json, price, days)| {
+            let models = parse_models_json(&models_json, &model);
             json!({
-                "id": id, "name": name, "model": model,
-                "total_tokens": tokens, "points": tokens, "token_allowance": tokens,
-                "token_multiplier": multiplier, "price_cents": price,
+                "id": id, "name": name, "model": model, "models": models,
+                "total_tokens": points, "points": points, "token_allowance": points,
+                "price_cents": price,
                 "price_yuan": format!("{:.2}", price as f64 / 100.0),
                 "duration_days": days,
             })

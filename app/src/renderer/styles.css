@@ -565,13 +565,30 @@ button {
   50% { opacity: 0.36; }
 }
 
-.model-tag {
+.model-tag,
+.model-select {
   overflow: hidden;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.model-select {
+  width: min(260px, 100%);
+  min-height: 30px;
+  padding: 4px 26px 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: var(--paper-soft);
+  outline: none;
+}
+
+.model-select:disabled {
+  color: var(--muted);
+  opacity: 0.72;
 }
 
 .theme-switcher {
@@ -1013,6 +1030,14 @@ button {
 
 .activity.file {
   border-left-color: var(--ok);
+}
+
+.activity.command {
+  border-left-color: var(--warn);
+}
+
+.activity.tool {
+  border-left-color: var(--accent);
 }
 
 .activity.reasoning {

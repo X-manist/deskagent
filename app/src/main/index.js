@@ -92,6 +92,7 @@ let auth = { token: '', phone: '' };
 let directRelayFallbackActive = false;
 let backendProc = null;
 let backendStartPromise = null;
+let memberModelsCache = [];
 
 function loadAuth() {
   try {
@@ -366,14 +367,29 @@ async function cloudDefaultModel() {
   }
 }
 
-async function preferredMemberModel() {
-  if (!isLoggedIn()) return '';
+async function memberModelOptions() {
+  if (!isLoggedIn()) return [];
   try {
     const me = await backendFetch('/api/me', { withAuth: true });
-    const entitlements = Array.isArray(me.entitlements) ? me.entitlements : [];
-    const entitlement = entitlements.find((item) => Number(item.tokens_remaining || 0) > 0 && item.model);
-    if (entitlement) return entitlement.model;
+    const allowed = Array.isArray(me.allowed_models) ? me.allowed_models : [];
+    memberModelsCache = allowed.filter((model) => model && model.id);
+    if (memberModelsCache.length) return memberModelsCache;
   } catch (_) {}
+  try {
+    const catalog = await backendFetch('/api/models');
+    memberModelsCache = Array.isArray(catalog.models) ? catalog.models.filter((model) => model && model.id) : [];
+  } catch (_) {
+    memberModelsCache = [];
+  }
+  return memberModelsCache;
+}
+
+async function preferredMemberModel() {
+  if (!isLoggedIn()) return '';
+  const available = await memberModelOptions();
+  const current = getSettings().model;
+  if (available.some((model) => model.id === current)) return current;
+  if (available[0] && available[0].id) return available[0].id;
   return cloudDefaultModel();
 }
 
@@ -385,8 +401,21 @@ async function refreshMemberModelSetting() {
   const next = { ...current, model };
   settingsCache = next;
   saveSettings(next);
-  sendToWindow('settings:updated', { ...next, apiKey: next.apiKey ? '••••••••' : '' });
+  sendToWindow('settings:updated', {
+    ...next,
+    apiKey: next.apiKey ? '••••••••' : '',
+    availableModels: memberModelsCache,
+  });
   return next;
+}
+
+async function restartEngineForSettings() {
+  if (!isLoggedIn()) return;
+  if (engine) {
+    await engine.stop();
+    engine = null;
+  }
+  await startEngine();
 }
 
 // Copy bundled agent configuration into the dedicated runtime home.
@@ -507,8 +536,13 @@ function createWindow() {
 
 // ---- IPC ----
 ipcMain.handle('app:bootstrap', async () => {
+  if (isLoggedIn()) await memberModelOptions();
   return {
-    settings: { ...getSettings(), apiKey: getSettings().apiKey ? '••••••••' : '' },
+    settings: {
+      ...getSettings(),
+      apiKey: getSettings().apiKey ? '••••••••' : '',
+      availableModels: memberModelsCache,
+    },
     paths: { workspaceDir: paths.workspaceDir },
     currentThreadId: engine && engine.threadId,
     auth: { loggedIn: isLoggedIn(), phone: auth.phone },
@@ -543,6 +577,26 @@ ipcMain.handle('auth:verifySms', async (_e, { phone, code }) => {
 });
 
 ipcMain.handle('auth:me', async () => backendFetch('/api/me', { withAuth: true }));
+
+ipcMain.handle('settings:setModel', async (_e, model) => {
+  const requested = String(model || '').trim();
+  if (!requested) throw new Error('缺少模型');
+  const options = await memberModelOptions();
+  if (options.length && !options.some((item) => item.id === requested)) {
+    throw new Error('当前套餐不支持该模型');
+  }
+  const current = getSettings();
+  const next = { ...current, model: requested };
+  settingsCache = next;
+  saveSettings(next);
+  sendToWindow('settings:updated', {
+    ...next,
+    apiKey: next.apiKey ? '••••••••' : '',
+    availableModels: memberModelsCache,
+  });
+  await restartEngineForSettings();
+  return { ok: true, settings: { ...next, apiKey: next.apiKey ? '••••••••' : '', availableModels: memberModelsCache } };
+});
 
 ipcMain.handle('auth:packages', async () => backendFetch('/api/packages'));
 

@@ -120,7 +120,7 @@ async fn forward_metered(
         user.0.sub,
         &model,
         st.cfg.reserve_tokens,
-        st.cfg.free_turns,
+        model_cfg.point_multiplier,
     )
     .await?;
 
@@ -343,7 +343,7 @@ async fn handle_chat_ws(mut socket: WebSocket, st: AppState, user: AuthUser) {
         user.0.sub,
         &model,
         st.cfg.reserve_tokens,
-        st.cfg.free_turns,
+        model_cfg.point_multiplier,
     )
     .await
     {

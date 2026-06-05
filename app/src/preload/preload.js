@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   mountWorkspace: () => ipcRenderer.invoke('app:mountWorkspace'),
   createWorkspaceCheckpoint: (label) => ipcRenderer.invoke('app:createWorkspaceCheckpoint', label),
   rollbackWorkspace: () => ipcRenderer.invoke('app:rollbackWorkspace'),
+  setModel: (model) => ipcRenderer.invoke('settings:setModel', model),
   remote: {
     status: () => ipcRenderer.invoke('remote:status'),
     refreshPairing: () => ipcRenderer.invoke('remote:refreshPairing'),

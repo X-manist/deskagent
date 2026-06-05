@@ -35,6 +35,41 @@ input, select {
   padding: 8px 10px;
   font-size: 14px;
 }
+.model-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  max-width: 620px;
+}
+.model-checks label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2);
+}
+.model-checks label.disabled {
+  opacity: 0.55;
+}
+.model-checks input {
+  width: auto;
+  padding: 0;
+}
+.model-checks span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-checks em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+}
 .muted { color: var(--muted); }
 .entitlements {
   display: flex;
@@ -123,6 +158,10 @@ th { color: var(--muted); font-weight: 600; }
 }
 .tiny-field {
   min-width: 110px;
+}
+.model-field {
+  min-width: 420px;
+  flex: 1 1 420px;
 }
 .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 h2 { margin: 0; }

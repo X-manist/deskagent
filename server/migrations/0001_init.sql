@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS users (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   phone           TEXT NOT NULL UNIQUE,
   role            TEXT NOT NULL DEFAULT 'user',
-  free_turns_used INTEGER NOT NULL DEFAULT 0,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   last_login_at   TEXT
 );
@@ -21,13 +20,16 @@ CREATE TABLE IF NOT EXISTS sms_throttle (
   lockout_until TEXT
 );
 
--- Purchasable plans. Admin sets model, point allowance, price, and billing multiplier.
+-- Purchasable plans. Admin sets point allowance, price, and the model list
+-- allowed by the plan. The legacy single-model columns remain for older rows.
 CREATE TABLE IF NOT EXISTS packages (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   name          TEXT NOT NULL,
   model         TEXT NOT NULL,
   total_tokens  INTEGER NOT NULL,
   token_multiplier REAL NOT NULL DEFAULT 1.0,
+  points        INTEGER NOT NULL DEFAULT 0,
+  models_json   TEXT NOT NULL DEFAULT '[]',
   price_cents   INTEGER NOT NULL,
   duration_days INTEGER NOT NULL,
   active        INTEGER NOT NULL DEFAULT 1,
@@ -47,6 +49,8 @@ CREATE TABLE IF NOT EXISTS orders (
   pkg_model      TEXT NOT NULL,
   pkg_tokens     INTEGER NOT NULL,
   pkg_token_multiplier REAL NOT NULL DEFAULT 1.0,
+  pkg_points     INTEGER NOT NULL DEFAULT 0,
+  pkg_models_json TEXT NOT NULL DEFAULT '[]',
   pkg_days       INTEGER NOT NULL,
   amount_cents   INTEGER NOT NULL,
   provider       TEXT NOT NULL,            -- manual | alipay | wechat
@@ -58,8 +62,9 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
 
--- One row per granted purchase. Balances stack; the gateway picks a valid
--- entitlement (not expired, has remaining tokens) matching the requested model.
+-- One row per granted purchase or test grant. Balances stack; each entitlement
+-- is a shared point pool and the gateway checks whether the requested model is
+-- included in models_json before charging that model's point multiplier.
 CREATE TABLE IF NOT EXISTS entitlements (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id         INTEGER NOT NULL REFERENCES users(id),
@@ -67,6 +72,8 @@ CREATE TABLE IF NOT EXISTS entitlements (
   model           TEXT NOT NULL,
   token_allowance INTEGER NOT NULL,
   token_multiplier REAL NOT NULL DEFAULT 1.0,
+  points          INTEGER NOT NULL DEFAULT 0,
+  models_json     TEXT NOT NULL DEFAULT '[]',
   tokens_used     INTEGER NOT NULL DEFAULT 0,
   status          TEXT NOT NULL DEFAULT 'active',
   starts_at       TEXT NOT NULL DEFAULT (datetime('now')),

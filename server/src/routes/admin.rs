@@ -10,6 +10,57 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+fn parse_models_json(raw: &str, fallback: &str) -> Vec<String> {
+    let mut models = serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect::<Vec<_>>();
+    if models.is_empty() && !fallback.trim().is_empty() {
+        models.push(fallback.trim().to_string());
+    }
+    models.sort();
+    models.dedup();
+    models
+}
+
+fn normalize_requested_models(
+    st: &AppState,
+    models: Option<&[String]>,
+    legacy_model: Option<&str>,
+) -> AppResult<Vec<String>> {
+    let mut out = models
+        .unwrap_or(&[])
+        .iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect::<Vec<_>>();
+    if out.is_empty() {
+        if let Some(model) = legacy_model.map(str::trim).filter(|model| !model.is_empty()) {
+            out.push(model.to_string());
+        }
+    }
+    if out.is_empty() {
+        out.push(st.cfg.default_model.clone());
+    }
+    out.sort();
+    out.dedup();
+    for model in &out {
+        let cfg = st
+            .cfg
+            .model(model)
+            .ok_or_else(|| AppError::bad(format!("模型未开放或不存在: {model}")))?;
+        if cfg.api_key.trim().is_empty() {
+            return Err(AppError::bad(format!(
+                "模型 {} 未配置云端密钥，不能分配到套餐",
+                cfg.display_name
+            )));
+        }
+    }
+    Ok(out)
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin/api/login", post(login))
@@ -65,11 +116,12 @@ async fn stats(State(st): State<AppState>, _a: AuthAdmin) -> AppResult<Json<serd
     )
     .fetch_one(&st.db)
     .await?;
-    let total_turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_sessions")
-        .fetch_one(&st.db)
-        .await?;
     let total_tokens: i64 =
         sqlx::query_scalar("SELECT COALESCE(SUM(total_tokens),0) FROM usage_sessions")
+            .fetch_one(&st.db)
+            .await?;
+    let total_points: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(reserved_tokens),0) FROM usage_sessions")
             .fetch_one(&st.db)
             .await?;
     Ok(Json(json!({
@@ -78,7 +130,7 @@ async fn stats(State(st): State<AppState>, _a: AuthAdmin) -> AppResult<Json<serd
         "orders_paid": paid_orders,
         "revenue_cents": revenue_cents,
         "revenue_yuan": format!("{:.2}", revenue_cents as f64 / 100.0),
-        "turns_total": total_turns,
+        "points_used_total": total_points.max(0),
         "tokens_total": total_tokens,
     })))
 }
@@ -97,54 +149,67 @@ async fn list_users(
     State(st): State<AppState>,
     _a: AuthAdmin,
 ) -> AppResult<Json<serde_json::Value>> {
-    let rows: Vec<(i64, String, i64, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, phone, free_turns_used, created_at, last_login_at FROM users ORDER BY id DESC LIMIT 500",
+    let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, phone, created_at, last_login_at FROM users ORDER BY id DESC LIMIT 500",
     )
     .fetch_all(&st.db)
     .await?;
     let mut list = Vec::new();
-    for (id, phone, free_used, created, last_login) in rows {
-        let turns: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM usage_sessions WHERE user_id = ?")
-                .bind(id)
-                .fetch_one(&st.db)
-                .await?;
+    for (id, phone, created, last_login) in rows {
         let tokens: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(total_tokens),0) FROM usage_sessions WHERE user_id = ?",
         )
         .bind(id)
         .fetch_one(&st.db)
         .await?;
+        let points_used: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(reserved_tokens),0) FROM usage_sessions WHERE user_id = ?",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
         let points_remaining: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(token_allowance - tokens_used),0) FROM entitlements
+            "SELECT COALESCE(SUM((CASE WHEN points > 0 THEN points ELSE token_allowance END) - tokens_used),0) FROM entitlements
              WHERE user_id = ? AND status='active' AND expires_at > datetime('now')",
         )
         .bind(id)
         .fetch_one(&st.db)
         .await?;
-        let entitlement_rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT model, COALESCE(SUM(token_allowance - tokens_used),0) FROM entitlements
+        let entitlement_rows: Vec<(i64, String, i64, String, i64, String)> = sqlx::query_as(
+            "SELECT id, model, CASE WHEN points > 0 THEN points ELSE token_allowance END, models_json, tokens_used, expires_at FROM entitlements
              WHERE user_id = ? AND status='active' AND expires_at > datetime('now')
-             GROUP BY model ORDER BY model",
+             ORDER BY expires_at ASC, id ASC",
         )
         .bind(id)
         .fetch_all(&st.db)
         .await?;
         let entitlements: Vec<serde_json::Value> = entitlement_rows
             .into_iter()
-            .map(|(model, remaining)| {
+            .map(|(ent_id, model, points, models_json, used, expires_at)| {
+                let models = parse_models_json(&models_json, &model);
                 json!({
+                    "id": ent_id,
                     "model": model,
-                    "points_remaining": remaining.max(0),
-                    "tokens_remaining": remaining.max(0),
+                    "models": models,
+                    "points": points,
+                    "points_used": used,
+                    "points_remaining": (points - used).max(0),
+                    "expires_at": expires_at,
                 })
             })
             .collect();
-        let models = entitlements
+        let mut models = entitlements
             .iter()
-            .filter_map(|item| item.get("model").and_then(|m| m.as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .flat_map(|item| {
+                item.get("models")
+                    .and_then(|m| m.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+            .collect::<Vec<_>>();
+        models.sort();
+        models.dedup();
         let spent: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE user_id = ? AND status='granted'",
         )
@@ -153,14 +218,11 @@ async fn list_users(
         .await?;
         list.push(json!({
             "id": id, "phone": phone,
-            "free_turns_used": free_used,
-            "free_turns_total": st.cfg.free_turns,
-            "free_turns_remaining": (st.cfg.free_turns - free_used).max(0),
             "points_remaining": points_remaining.max(0),
-            "tokens_remaining": points_remaining.max(0),
+            "points_used": points_used.max(0),
             "entitlements": entitlements,
             "models": models,
-            "turns": turns, "tokens": tokens,
+            "tokens": tokens,
             "spent_cents": spent,
             "spent_yuan": format!("{:.2}", spent as f64 / 100.0),
             "created_at": created, "last_login_at": last_login,
@@ -179,9 +241,9 @@ struct TestUserReq {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
+    models: Option<Vec<String>>,
+    #[serde(default)]
     duration_days: Option<i64>,
-    #[serde(default = "default_multiplier")]
-    token_multiplier: f64,
 }
 
 fn valid_phone(p: &str) -> bool {
@@ -217,34 +279,24 @@ async fn create_test_user(
     if allowance > 0 && duration_days <= 0 {
         return Err(AppError::bad("测试积分有效天数必须大于 0"));
     }
-    if !req.token_multiplier.is_finite() || req.token_multiplier <= 0.0 {
-        return Err(AppError::bad("计费倍率必须大于 0"));
-    }
-    let requested_model = req
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .unwrap_or(st.cfg.default_model.as_str())
-        .to_string();
-    let model_cfg = st
-        .cfg
-        .model(&requested_model)
-        .ok_or_else(|| AppError::bad(format!("模型未开放或不存在: {requested_model}")))?;
-    if allowance > 0 && model_cfg.api_key.trim().is_empty() {
-        return Err(AppError::bad(format!(
-            "模型 {} 未配置云端密钥，不能发放额度",
-            model_cfg.display_name
-        )));
-    }
-    let model = model_cfg.id;
+    let models = if allowance > 0 {
+        normalize_requested_models(&st, req.models.as_deref(), req.model.as_deref())?
+    } else {
+        Vec::new()
+    };
+    let model = models
+        .first()
+        .cloned()
+        .unwrap_or_else(|| st.cfg.default_model.clone());
+    let models_json =
+        serde_json::to_string(&models).map_err(|_| AppError::bad("模型列表格式不正确"))?;
 
     let mut tx = st.db.begin().await?;
-    let (id, free_used): (i64, i64) = sqlx::query_as(
+    let id: i64 = sqlx::query_scalar(
         "INSERT INTO users (phone, last_login_at)
          VALUES (?, datetime('now'))
          ON CONFLICT(phone) DO UPDATE SET last_login_at = datetime('now')
-         RETURNING id, free_turns_used",
+         RETURNING id",
     )
     .bind(&phone)
     .fetch_one(&mut *tx)
@@ -261,25 +313,25 @@ async fn create_test_user(
     }
     let entitlement = if allowance > 0 {
         let (entitlement_id, expires_at): (i64, String) = sqlx::query_as(
-            "INSERT INTO entitlements (user_id, order_id, model, token_allowance, token_multiplier, expires_at, status)
-             VALUES (?, NULL, ?, ?, ?, datetime('now', ?), 'active')
+            "INSERT INTO entitlements (user_id, order_id, model, token_allowance, token_multiplier, points, models_json, expires_at, status)
+             VALUES (?, NULL, ?, ?, 1.0, ?, ?, datetime('now', ?), 'active')
              RETURNING id, expires_at",
         )
         .bind(id)
         .bind(&model)
         .bind(allowance)
-        .bind(req.token_multiplier)
+        .bind(allowance)
+        .bind(&models_json)
         .bind(format!("+{duration_days} days"))
         .fetch_one(&mut *tx)
         .await?;
         Some(json!({
             "id": entitlement_id,
             "model": &model,
+            "models": &models,
             "token_allowance": allowance,
             "points": allowance,
-            "token_multiplier": req.token_multiplier,
             "tokens_used": 0,
-            "tokens_remaining": allowance,
             "points_remaining": allowance,
             "duration_days": duration_days,
             "expires_at": expires_at,
@@ -298,8 +350,9 @@ async fn create_test_user(
             "user #{id} {phone}{}",
             if allowance > 0 {
                 format!(
-                    " +{allowance} points {model} x{}/{}d",
-                    req.token_multiplier, duration_days
+                    " +{allowance} points [{}]/{}d",
+                    models.join(", "),
+                    duration_days
                 )
             } else {
                 String::new()
@@ -312,9 +365,8 @@ async fn create_test_user(
         "user": {
             "id": id,
             "phone": phone,
-            "free_turns_total": st.cfg.free_turns,
-            "free_turns_used": free_used,
-            "free_turns_remaining": (st.cfg.free_turns - free_used).max(0),
+            "points_remaining": allowance,
+            "models": models,
         },
         "entitlement": entitlement,
         "token": token,
@@ -348,8 +400,8 @@ async fn list_packages(
     State(st): State<AppState>,
     _a: AuthAdmin,
 ) -> AppResult<Json<serde_json::Value>> {
-    let rows: Vec<(i64, String, String, i64, f64, i64, i64, i64, i64)> = sqlx::query_as(
-        "SELECT id, name, model, total_tokens, token_multiplier, price_cents, duration_days, active, sort_order
+    let rows: Vec<(i64, String, String, i64, String, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT id, name, model, CASE WHEN points > 0 THEN points ELSE total_tokens END, models_json, price_cents, duration_days, active, sort_order
          FROM packages ORDER BY sort_order ASC, id ASC",
     )
     .fetch_all(&st.db)
@@ -357,11 +409,11 @@ async fn list_packages(
     let list: Vec<serde_json::Value> = rows
         .into_iter()
         .map(
-            |(id, name, model, tokens, multiplier, price, days, active, sort)| {
+            |(id, name, model, points, models_json, price, days, active, sort)| {
+                let models = parse_models_json(&models_json, &model);
                 json!({
-                    "id": id, "name": name, "model": model,
-                    "total_tokens": tokens, "points": tokens, "token_allowance": tokens,
-                    "token_multiplier": multiplier,
+                    "id": id, "name": name, "model": model, "models": models,
+                    "total_tokens": points, "points": points, "token_allowance": points,
                     "price_cents": price, "price_yuan": format!("{:.2}", price as f64 / 100.0),
                     "duration_days": days,
                     "active": active == 1, "sort_order": sort,
@@ -375,10 +427,14 @@ async fn list_packages(
 #[derive(Deserialize)]
 struct PackageReq {
     name: String,
-    model: String,
-    total_tokens: i64,
-    #[serde(default = "default_multiplier")]
-    token_multiplier: f64,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    models: Option<Vec<String>>,
+    #[serde(default)]
+    total_tokens: Option<i64>,
+    #[serde(default)]
+    points: Option<i64>,
     price_cents: i64,
     duration_days: i64,
     #[serde(default = "default_true")]
@@ -389,29 +445,17 @@ struct PackageReq {
 fn default_true() -> bool {
     true
 }
-fn default_multiplier() -> f64 {
-    1.0
+
+fn package_points(req: &PackageReq) -> i64 {
+    req.points.or(req.total_tokens).unwrap_or(0)
 }
 
-fn validate_package(st: &AppState, req: &PackageReq) -> AppResult<()> {
+fn validate_package(st: &AppState, req: &PackageReq) -> AppResult<(i64, Vec<String>, String)> {
     if req.name.trim().is_empty() {
         return Err(AppError::bad("套餐名称不能为空"));
     }
-    let model = req.model.trim();
-    if model.is_empty() {
-        return Err(AppError::bad("模型不能为空"));
-    }
-    let model_cfg = st
-        .cfg
-        .model(model)
-        .ok_or_else(|| AppError::bad(format!("模型未开放或不存在: {model}")))?;
-    if model_cfg.api_key.trim().is_empty() {
-        return Err(AppError::bad(format!(
-            "模型 {} 未配置云端密钥，不能创建套餐",
-            model_cfg.display_name
-        )));
-    }
-    if req.total_tokens <= 0 {
+    let points = package_points(req);
+    if points <= 0 {
         return Err(AppError::bad("套餐积分数必须大于 0"));
     }
     if req.price_cents < 0 {
@@ -420,10 +464,12 @@ fn validate_package(st: &AppState, req: &PackageReq) -> AppResult<()> {
     if req.duration_days <= 0 {
         return Err(AppError::bad("有效天数必须大于 0"));
     }
-    if !req.token_multiplier.is_finite() || req.token_multiplier <= 0.0 {
-        return Err(AppError::bad("计费倍率必须大于 0"));
-    }
-    Ok(())
+    let models = normalize_requested_models(&st, req.models.as_deref(), req.model.as_deref())?;
+    let primary_model = models
+        .first()
+        .cloned()
+        .unwrap_or_else(|| st.cfg.default_model.clone());
+    Ok((points, models, primary_model))
 }
 
 async fn create_package(
@@ -431,15 +477,18 @@ async fn create_package(
     a: AuthAdmin,
     Json(req): Json<PackageReq>,
 ) -> AppResult<Json<serde_json::Value>> {
-    validate_package(&st, &req)?;
+    let (points, models, primary_model) = validate_package(&st, &req)?;
+    let models_json =
+        serde_json::to_string(&models).map_err(|_| AppError::bad("模型列表格式不正确"))?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO packages (name, model, total_tokens, token_multiplier, price_cents, duration_days, active, sort_order)
-         VALUES (?,?,?,?,?,?,?,?) RETURNING id",
+        "INSERT INTO packages (name, model, total_tokens, token_multiplier, points, models_json, price_cents, duration_days, active, sort_order)
+         VALUES (?,?,?,1.0,?,?,?,?,?,?) RETURNING id",
     )
     .bind(req.name.trim())
-    .bind(req.model.trim())
-    .bind(req.total_tokens)
-    .bind(req.token_multiplier)
+    .bind(&primary_model)
+    .bind(points)
+    .bind(points)
+    .bind(&models_json)
     .bind(req.price_cents)
     .bind(req.duration_days)
     .bind(req.active as i64)
@@ -451,8 +500,10 @@ async fn create_package(
         &a.0.username,
         "create_package",
         &format!(
-            "#{id} {} {} {} points x{}",
-            req.name, req.model, req.total_tokens, req.token_multiplier
+            "#{id} {} {} points [{}]",
+            req.name,
+            points,
+            models.join(", ")
         ),
     )
     .await;
@@ -465,14 +516,17 @@ async fn update_package(
     Path(id): Path<i64>,
     Json(req): Json<PackageReq>,
 ) -> AppResult<Json<serde_json::Value>> {
-    validate_package(&st, &req)?;
+    let (points, models, primary_model) = validate_package(&st, &req)?;
+    let models_json =
+        serde_json::to_string(&models).map_err(|_| AppError::bad("模型列表格式不正确"))?;
     let res = sqlx::query(
-        "UPDATE packages SET name=?, model=?, total_tokens=?, token_multiplier=?, price_cents=?, duration_days=?, active=?, sort_order=? WHERE id=?",
+        "UPDATE packages SET name=?, model=?, total_tokens=?, token_multiplier=1.0, points=?, models_json=?, price_cents=?, duration_days=?, active=?, sort_order=? WHERE id=?",
     )
     .bind(req.name.trim())
-    .bind(req.model.trim())
-    .bind(req.total_tokens)
-    .bind(req.token_multiplier)
+    .bind(&primary_model)
+    .bind(points)
+    .bind(points)
+    .bind(&models_json)
     .bind(req.price_cents)
     .bind(req.duration_days)
     .bind(req.active as i64)
@@ -488,8 +542,10 @@ async fn update_package(
         &a.0.username,
         "update_package",
         &format!(
-            "#{id} {} {} {} points x{}",
-            req.name, req.model, req.total_tokens, req.token_multiplier
+            "#{id} {} {} points [{}]",
+            req.name,
+            points,
+            models.join(", ")
         ),
     )
     .await;

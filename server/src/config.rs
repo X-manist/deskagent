@@ -10,6 +10,7 @@ pub struct ModelConfig {
     pub provider: String,
     pub base_url: String,
     pub api_key: String,
+    pub point_multiplier: f64,
 }
 
 #[derive(Clone)]
@@ -23,8 +24,10 @@ pub struct Config {
     pub upstream_api_key: String,
     pub default_model: String,
     pub models: Vec<ModelConfig>,
-    // Free quota for brand-new users.
-    pub free_turns: i64,
+    // Free credits for brand-new users. This replaces turn-based free quota.
+    pub free_points: i64,
+    pub free_points_duration_days: i64,
+    pub free_models: Vec<String>,
     // Per-request token reservation when a precise estimate is unavailable.
     pub reserve_tokens: i64,
     pub max_body_bytes: usize,
@@ -63,6 +66,14 @@ fn ev_trim(key: &str) -> String {
     env::var(key).unwrap_or_default().trim().to_string()
 }
 
+fn ev_f64(key: &str, default: f64) -> f64 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(default)
+}
+
 fn preferred_provider() -> String {
     let explicit = ev("UPSTREAM_PROVIDER", "");
     if !explicit.trim().is_empty() {
@@ -96,6 +107,8 @@ struct ModelCatalogEntry {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
+    point_multiplier: Option<f64>,
     #[serde(default = "default_catalog_enabled")]
     enabled: bool,
 }
@@ -112,6 +125,14 @@ fn default_api_key_env(provider: &str) -> &'static str {
     }
 }
 
+fn default_point_multiplier(provider: &str) -> f64 {
+    match provider {
+        "glm" => ev_f64("GLM_POINT_MULTIPLIER", 1.0),
+        "deepseek" => ev_f64("DEEPSEEK_POINT_MULTIPLIER", 1.2),
+        _ => ev_f64("OPENAI_POINT_MULTIPLIER", 3.0),
+    }
+}
+
 fn default_base_url(provider: &str) -> String {
     match provider {
         "glm" => ev("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
@@ -120,7 +141,22 @@ fn default_base_url(provider: &str) -> String {
     }
 }
 
-fn push_model(models: &mut Vec<ModelConfig>, id: String, display_name: String, provider: &str) {
+fn csv_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn push_model(
+    models: &mut Vec<ModelConfig>,
+    id: String,
+    display_name: String,
+    provider: &str,
+    point_multiplier: f64,
+) {
     let id = id.trim().to_string();
     if id.is_empty() || models.iter().any(|model| model.id == id) {
         return;
@@ -133,6 +169,11 @@ fn push_model(models: &mut Vec<ModelConfig>, id: String, display_name: String, p
         provider: provider.clone(),
         base_url: default_base_url(&provider),
         api_key: ev_trim(api_key_env),
+        point_multiplier: if point_multiplier.is_finite() && point_multiplier > 0.0 {
+            point_multiplier
+        } else {
+            default_point_multiplier(&provider)
+        },
     });
 }
 
@@ -174,6 +215,10 @@ fn configured_models(
                         .base_url
                         .unwrap_or_else(|| default_base_url(&provider)),
                     api_key,
+                    point_multiplier: entry
+                        .point_multiplier
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                        .unwrap_or_else(|| default_point_multiplier(&provider)),
                 });
             }
             if !out.is_empty() {
@@ -190,19 +235,36 @@ fn configured_models(
         ev("GLM_MODEL", "glm-5.1"),
         ev("GLM_DISPLAY_NAME", "GLM 5.1"),
         "glm",
+        ev_f64("GLM_POINT_MULTIPLIER", 1.0),
     );
     push_model(
         &mut models,
         ev("DEEPSEEK_MODEL", "deepseek-v4-pro"),
         ev("DEEPSEEK_DISPLAY_NAME", "DeepSeek V4 Pro"),
         "deepseek",
+        ev_f64("DEEPSEEK_POINT_MULTIPLIER", 1.2),
     );
     if env::var("OPENAI_API_KEY").is_ok() || env::var("OPENAI_BASE_URL").is_ok() {
+        push_model(
+            &mut models,
+            ev("GPT_5_5_MODEL", "gpt-5.5"),
+            ev("GPT_5_5_DISPLAY_NAME", "GPT 5.5"),
+            "openai",
+            ev_f64("GPT_5_5_POINT_MULTIPLIER", 5.0),
+        );
+        push_model(
+            &mut models,
+            ev("GPT_5_4_MODEL", "gpt-5.4"),
+            ev("GPT_5_4_DISPLAY_NAME", "GPT 5.4"),
+            "openai",
+            ev_f64("GPT_5_4_POINT_MULTIPLIER", 3.0),
+        );
         push_model(
             &mut models,
             ev("ADAPTER_MODEL", &ev("OPENAI_MODEL", default_model)),
             ev("OPENAI_DISPLAY_NAME", "OpenAI Relay"),
             "openai",
+            ev_f64("OPENAI_POINT_MULTIPLIER", 3.0),
         );
     }
     if !models.iter().any(|model| model.id == default_model) {
@@ -212,6 +274,7 @@ fn configured_models(
             provider: preferred_provider(),
             base_url: fallback_base_url.to_string(),
             api_key: fallback_api_key.to_string(),
+            point_multiplier: default_point_multiplier(&preferred_provider()),
         });
     }
     models
@@ -236,6 +299,15 @@ impl Config {
             ev("ADAPTER_MODEL", &ev("OPENAI_MODEL", "glm-5.1"))
         };
         let models = configured_models(&default_model, &upstream_base_url, &upstream_api_key);
+        let free_models = {
+            let raw = ev("FREE_MODELS", &default_model);
+            let models = csv_list(&raw);
+            if models.is_empty() {
+                vec![default_model.clone()]
+            } else {
+                models
+            }
+        };
         Config {
             database_url: ev("DATABASE_URL", "sqlite://deskagent.db?mode=rwc"),
             bind_addr: ev("BIND_ADDR", "127.0.0.1:8787"),
@@ -245,7 +317,11 @@ impl Config {
             upstream_api_key,
             default_model,
             models,
-            free_turns: ev("FREE_TURNS", "20").parse().unwrap_or(20),
+            free_points: ev("FREE_POINTS", "80000").parse().unwrap_or(80_000),
+            free_points_duration_days: ev("FREE_POINTS_DURATION_DAYS", "30")
+                .parse()
+                .unwrap_or(30),
+            free_models,
             reserve_tokens: ev("RESERVE_TOKENS", "4000").parse().unwrap_or(4000),
             max_body_bytes: ev("MAX_BODY_BYTES", "2097152").parse().unwrap_or(2_097_152),
             allow_manual_pay: ev("ALLOW_MANUAL_PAY", "false") == "true",
@@ -286,6 +362,7 @@ impl Config {
                     "display_name": &model.display_name,
                     "provider": &model.provider,
                     "configured": !model.api_key.trim().is_empty(),
+                    "point_multiplier": model.point_multiplier,
                 })
             })
             .collect()

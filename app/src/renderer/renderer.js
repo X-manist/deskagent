@@ -54,6 +54,8 @@ let activeConversationPromise = null;
 let remoteState = null;
 let urlDownloading = false;
 let currentWorkspaceDir = '';
+let currentModel = '';
+let availableModels = [];
 
 function basename(value) {
   return String(value || '').split(/[\\/]/).filter(Boolean).pop() || value || '';
@@ -68,9 +70,43 @@ function setWorkspaceHint(dir) {
 }
 
 function setModelTag(settings) {
-  const model = settings && settings.model ? settings.model : '';
-  modelTag.textContent = model ? `模型：${model}` : '';
-  if (settingsModel) settingsModel.textContent = model || '登录后自动获取';
+  currentModel = settings && settings.model ? settings.model : currentModel;
+  if (settings && Array.isArray(settings.availableModels)) availableModels = settings.availableModels;
+  renderModelSelect();
+  if (settingsModel) settingsModel.textContent = currentModel || '登录后自动获取';
+}
+
+function modelDisplayName(model) {
+  if (!model) return '';
+  return model.display_name || model.name || model.id || '';
+}
+
+function renderModelSelect() {
+  if (!modelTag) return;
+  const options = availableModels.length
+    ? availableModels
+    : (currentModel ? [{ id: currentModel, display_name: currentModel, configured: true }] : []);
+  modelTag.innerHTML = '';
+  if (!options.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '登录后自动获取模型';
+    modelTag.appendChild(opt);
+    modelTag.disabled = true;
+    return;
+  }
+  options.forEach((model) => {
+    const opt = document.createElement('option');
+    opt.value = model.id;
+    opt.textContent = modelDisplayName(model);
+    opt.disabled = model.configured === false;
+    if (model.point_multiplier) opt.title = `${Number(model.point_multiplier).toFixed(2)} 积分/token`;
+    modelTag.appendChild(opt);
+  });
+  const nextValue = options.some((model) => model.id === currentModel) ? currentModel : options[0].id;
+  modelTag.value = nextValue;
+  modelTag.disabled = options.length <= 1;
+  if (nextValue !== currentModel) currentModel = nextValue;
 }
 
 function renderSettingsSummary() {
@@ -206,7 +242,7 @@ function makeMessageEl(role, text) {
 
 function makeActivityEl(kind, text) {
   const el = document.createElement('div');
-  el.className = `activity ${kind === 'file' ? 'file' : kind === 'reasoning' ? 'reasoning' : ''}`;
+  el.className = `activity ${kind === 'file' ? 'file' : kind === 'reasoning' ? 'reasoning' : kind === 'tool' ? 'tool' : kind === 'command' ? 'command' : ''}`;
   if (kind === 'reasoning') {
     const details = document.createElement('details');
     const summary = document.createElement('summary');
@@ -266,6 +302,17 @@ function renderActive() {
 function activityDisplay(p) {
   if (p.kind === 'file') return '已修改文件：' + (p.files || []).join(', ');
   if (p.kind === 'reasoning') return p.text || '';
+  if (p.kind === 'command') {
+    const command = p.text || '';
+    const output = p.output ? String(p.output).trim() : '';
+    const status = p.phase === 'started' || p.phase === 'delta' ? '正在执行命令' : '命令执行完成';
+    return [status, command, output ? `输出：${output}` : ''].filter(Boolean).join('\n');
+  }
+  if (p.kind === 'tool') {
+    const output = p.output ? String(p.output).trim() : '';
+    const status = p.phase === 'started' || p.phase === 'progress' ? '正在调用工具' : '工具调用完成';
+    return [status, p.text || '', output ? `结果：${output}` : ''].filter(Boolean).join('\n');
+  }
   return p.text || '';
 }
 
@@ -614,6 +661,25 @@ themeButtons.forEach((button) => {
 });
 applyThemeMode(readThemeMode());
 
+if (modelTag) {
+  modelTag.addEventListener('change', async () => {
+    const next = modelTag.value;
+    if (!next || next === currentModel) return;
+    const prev = currentModel;
+    currentModel = next;
+    if (settingsModel) settingsModel.textContent = next;
+    try {
+      const result = await window.api.setModel(next);
+      if (result && result.settings) setModelTag(result.settings);
+      showSystemNotice(`已切换模型：${next}`);
+    } catch (e) {
+      currentModel = prev;
+      renderModelSelect();
+      showSendFailure((e && e.message) || '模型切换失败', activeConv());
+    }
+  });
+}
+
 // Attachments: picker menu
 attachBtn.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -810,26 +876,26 @@ window.api.on('chat:message', (p) => {
 });
 
 window.api.on('chat:activity', (p) => {
-  // Keep the chat transcript user-facing: hide internal command/MCP tool names.
   if (p.kind === 'file' && p.phase !== 'completed') return;
-  if (p.kind !== 'file' && p.kind !== 'reasoning') return;
+  if (!['file', 'reasoning', 'command', 'tool'].includes(p.kind)) return;
   const conv = getConv(p.threadId);
   if (!conv) return;
-  let item = p.itemId && conv.items.find((it) => it.kind === 'activity' && it.itemId === p.itemId);
+  const fallbackId = p.itemId || `${p.kind}:${conv.items.length}`;
+  let item = conv.items.find((it) => it.kind === 'activity' && it.itemId === fallbackId);
   const display = activityDisplay(p);
   if (!item) {
     item = {
       kind: 'activity',
       activityKind: p.kind,
       display,
-      itemId: p.itemId,
+      itemId: fallbackId,
     };
     pushItem(conv, item);
     return;
   }
   if (display || p.phase === 'completed') item.display = display;
   if (conv.id === activeId) {
-    const body = p.itemId && activeActivities.get(p.itemId);
+    const body = activeActivities.get(fallbackId);
     if (body) {
       body.textContent = item.display || '';
       scrollToBottom();
@@ -996,18 +1062,20 @@ function setLoggedIn(state) {
 async function refreshAccountBadge() {
   try {
     const me = await window.api.auth.me();
-    const ent = (me.entitlements || []).reduce((a, e) => a + (e.tokens_remaining || 0), 0);
+    if (Array.isArray(me.allowed_models)) {
+      availableModels = me.allowed_models;
+      renderModelSelect();
+    }
+    const ent = Number(me.points_remaining || 0);
     if (memberEl) {
-      memberEl.textContent = ent > 0
-        ? `${t('会员', 'Membership')}: ${t('剩余', 'remaining')} ${ent.toLocaleString()} Token`
-        : `${t('免费额度', 'Free quota')}: ${t('剩余', 'remaining')} ${me.free_turns_remaining} ${t('次', 'turns')}`;
+      memberEl.textContent = `${t('积分', 'Credits')}: ${t('剩余', 'remaining')} ${ent.toLocaleString()}`;
     }
   } catch (_) {}
 }
 
 function maybeQuotaPrompt(message) {
   const m = String(message || '');
-  if (/额度不足|quota|402|payment required/i.test(m)) {
+  if (/额度不足|积分不足|quota|402|payment required/i.test(m)) {
     openAccount();
   }
 }
@@ -1105,14 +1173,20 @@ async function openAccount() {
   listEl.innerHTML = '';
   try {
     const me = await window.api.auth.me();
+    if (Array.isArray(me.allowed_models)) {
+      availableModels = me.allowed_models;
+      renderModelSelect();
+    }
     const ents = me.entitlements || [];
     let html = `<div>${t('手机号', 'Phone')}: ${escapeHtml(me.phone)}</div>`;
-    html += `<div>${t('免费额度', 'Free quota')}: ${me.free_turns_remaining}/${me.free_turns_total} ${t('次', 'turns')}</div>`;
+    html += `<div>${t('积分余额', 'Credits')}: ${Number(me.points_remaining || 0).toLocaleString()}</div>`;
     if (ents.length) {
       ents.forEach((e) => {
-        const pct = e.token_allowance ? Math.max(0, Math.min(100, (e.tokens_remaining / e.token_allowance) * 100)) : 0;
-        const multiplier = Number(e.token_multiplier || 1).toFixed(2);
-        html += `<div style="margin-top:8px">${t('套餐', 'Plan')} (${escapeHtml(e.model)}): ${t('剩余', 'remaining')} ${e.tokens_remaining.toLocaleString()} / ${e.token_allowance.toLocaleString()} ${t('积分', 'points')} · ${multiplier}x (${t('至', 'until')} ${escapeHtml(e.expires_at)})`;
+        const remaining = Number(e.points_remaining || e.tokens_remaining || 0);
+        const total = Number(e.points || e.token_allowance || 0);
+        const pct = total ? Math.max(0, Math.min(100, (remaining / total) * 100)) : 0;
+        const models = Array.isArray(e.models) && e.models.length ? e.models.join(', ') : e.model;
+        html += `<div style="margin-top:8px">${t('套餐', 'Plan')} (${escapeHtml(models)}): ${t('剩余', 'remaining')} ${remaining.toLocaleString()} / ${total.toLocaleString()} ${t('积分', 'points')} (${t('至', 'until')} ${escapeHtml(e.expires_at)})`;
         html += `<div class="quota-bar"><span style="width:${pct}%"></span></div></div>`;
       });
     } else {
@@ -1124,9 +1198,10 @@ async function openAccount() {
     (packages || []).forEach((p) => {
       const row = document.createElement('div');
       row.className = 'pkg';
-      const multiplier = Number(p.token_multiplier || 1).toFixed(2);
+      const models = Array.isArray(p.models) && p.models.length ? p.models.join(', ') : p.model;
+      const points = Number(p.points || p.total_tokens || 0);
       row.innerHTML = `<div><div class="pkg-name">${escapeHtml(packageDisplayName(p))}</div>` +
-        `<div class="pkg-meta">${escapeHtml(p.model)} · ${p.total_tokens.toLocaleString()} ${t('积分', 'points')} · ${multiplier}x · ${p.duration_days} ${t('天', 'days')}</div></div>` +
+        `<div class="pkg-meta">${escapeHtml(models)} · ${points.toLocaleString()} ${t('积分', 'points')} · ${p.duration_days} ${t('天', 'days')}</div></div>` +
         `<div style="display:flex;align-items:center;gap:10px"><span class="pkg-price">¥${p.price_yuan}</span>` +
         `<button class="send-btn">${t('购买', 'Buy')}</button></div>`;
       row.querySelector('button').addEventListener('click', () => buyPackage(p, errEl));
@@ -1150,6 +1225,7 @@ async function buyPackage(p, errEl) {
         ? `${t('订单已创建', 'Order created')} (${order.out_trade_no}). ${t('等待支付通道返回支付链接后到账。', 'Waiting for payment provider details before activation.')}`
         : t('订单已创建，完成支付后自动到账。', 'Order created. Complete payment and the plan will activate automatically.');
     }
+    await refreshAccountBadge();
   } catch (e) {
     errEl.textContent = e && e.message ? e.message : t('购买失败', 'Purchase failed');
   }

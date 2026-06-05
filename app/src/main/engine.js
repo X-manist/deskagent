@@ -87,6 +87,17 @@ function reasoningSummaryText(summary) {
     .join('\n');
 }
 
+function compactJson(value, max = 500) {
+  if (value == null) return '';
+  let text = '';
+  try {
+    text = typeof value === 'string' ? value : JSON.stringify(value);
+  } catch (_) {
+    text = String(value);
+  }
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
 function resolveAgentRuntimeBin() {
   if (process.env.CODEX_BIN && fs.existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN;
   // packaged native runtime binary (branded name; never exposes the upstream name)
@@ -346,7 +357,11 @@ class Engine extends EventEmitter {
       `model = "${this.settings().model}"`,
       'model_provider = "relay"',
       'approval_policy = "never"',
-      'sandbox_mode = "workspace-write"',
+      // The desktop app already constrains the working directory and keeps
+      // provider keys out of the runtime env. Do not add Codex's command
+      // sandbox on top; on Windows it blocks normal local workflows such as
+      // python, pip, and binary file reads.
+      'sandbox_mode = "danger-full-access"',
       // Enable the native live web-search tool. In passthrough mode this reaches
       // the relay's hosted web_search so the model can search the internet
       // automatically with no extra MCP server.
@@ -541,7 +556,7 @@ class Engine extends EventEmitter {
       model: this.settings().model,
       cwd: this.opts.workspaceDir,
       approvalPolicy: 'never',
-      sandbox: 'workspace-write',
+      sandbox: 'danger-full-access',
       personality: 'friendly',
     };
   }
@@ -742,6 +757,39 @@ class Engine extends EventEmitter {
         });
         break;
       }
+      case 'item/commandExecution/outputDelta': {
+        const itemId = params.itemId || params.item_id || 'command';
+        const uiItemId = this._uiItemId(threadId, itemId);
+        const key = `${threadId}:${uiItemId}:command`;
+        const delta = params.delta || '';
+        const prev = this.deltaItems.get(key) || '';
+        const next = prev + delta;
+        this.deltaItems.set(key, next);
+        this.emit('activity', {
+          threadId,
+          kind: 'command',
+          phase: 'delta',
+          itemId: uiItemId,
+          sourceItemId: itemId,
+          delta,
+          output: next,
+          text: next,
+        });
+        break;
+      }
+      case 'item/mcpToolCall/progress': {
+        const itemId = params.itemId || params.item_id || 'mcp';
+        const uiItemId = this._uiItemId(threadId, itemId);
+        this.emit('activity', {
+          threadId,
+          kind: 'tool',
+          phase: 'progress',
+          itemId: uiItemId,
+          sourceItemId: itemId,
+          text: params.message || '工具执行中…',
+        });
+        break;
+      }
       case 'item/completed':
         this._emitItem(params.item, 'completed', threadId);
         break;
@@ -800,13 +848,23 @@ class Engine extends EventEmitter {
     if (t === 'agentMessage' && phase === 'completed') {
       this.emit('message', { threadId, itemId: this._uiItemId(threadId, item.id), sourceItemId: item.id, text: itemText || '' });
     } else if (t === 'commandExecution') {
+      const command = item.command || '';
+      const status = item.status || phase;
+      const output = item.aggregatedOutput || '';
       this.emit('activity', {
         threadId,
         kind: 'command',
         phase,
-        text: item.command || '',
-        status: item.status,
-        output: item.aggregatedOutput,
+        itemId: this._uiItemId(threadId, item.id || 'command'),
+        sourceItemId: item.id,
+        text: command,
+        status,
+        output,
+        display: [
+          phase === 'started' ? '正在执行命令' : '命令执行完成',
+          command,
+          output ? `输出：${output}` : '',
+        ].filter(Boolean).join('\n'),
       });
     } else if (t === 'fileChange') {
       this.emit('activity', {
@@ -825,6 +883,54 @@ class Engine extends EventEmitter {
         itemId: this._uiItemId(threadId, item.id || 'reasoning'),
         sourceItemId: item.id,
         text,
+      });
+    } else if (t === 'mcpToolCall') {
+      const status = item.status || phase;
+      const text = `${item.server || 'tool'}.${item.tool || ''}`;
+      const result = item.error ? compactJson(item.error) : compactJson(item.result);
+      this.emit('activity', {
+        threadId,
+        kind: 'tool',
+        phase,
+        itemId: this._uiItemId(threadId, item.id || 'mcp'),
+        sourceItemId: item.id,
+        text,
+        status,
+        output: result,
+        display: [
+          phase === 'started' ? '正在调用工具' : '工具调用完成',
+          text,
+          result ? `结果：${result}` : '',
+        ].filter(Boolean).join('\n'),
+      });
+    } else if (t === 'dynamicToolCall') {
+      const text = [item.namespace, item.tool].filter(Boolean).join('.') || item.tool || 'tool';
+      const output = compactJson(item.contentItems);
+      this.emit('activity', {
+        threadId,
+        kind: 'tool',
+        phase,
+        itemId: this._uiItemId(threadId, item.id || 'dynamic-tool'),
+        sourceItemId: item.id,
+        text,
+        status: item.status || phase,
+        output,
+        display: [
+          phase === 'started' ? '正在调用工具' : '工具调用完成',
+          text,
+          output ? `结果：${output}` : '',
+        ].filter(Boolean).join('\n'),
+      });
+    } else if (t === 'webSearch') {
+      this.emit('activity', {
+        threadId,
+        kind: 'tool',
+        phase,
+        itemId: this._uiItemId(threadId, item.id || 'web-search'),
+        sourceItemId: item.id,
+        text: item.query || 'web search',
+        status: phase,
+        display: `${phase === 'started' ? '正在搜索' : '搜索完成'}\n${item.query || ''}`,
       });
     }
   }
