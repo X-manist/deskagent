@@ -1,0 +1,161 @@
+name: Build macOS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_release:
+        description: Upload the macOS artifacts to the GitHub release for this ref
+        type: boolean
+        default: false
+      release_tag:
+        description: Release tag to upload to when upload_to_release is enabled
+        type: string
+        default: v0.1.0
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS app
+    runs-on: macos-14
+    env:
+      CARGO_TERM_COLOR: always
+      DESKAGENT_TARGET_PLATFORM: darwin
+      DESKAGENT_TARGET_ARCH: arm64
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY_B64 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            native/os-tools
+            server
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Prepare notarization API key
+        shell: bash
+        run: |
+          if [[ -n "${APPLE_API_KEY_B64:-}" ]]; then
+            mkdir -p "$RUNNER_TEMP/notary"
+            key_path="$RUNNER_TEMP/notary/AuthKey_${APPLE_API_KEY_ID}.p8"
+            printf '%s' "$APPLE_API_KEY_B64" | base64 -D > "$key_path"
+            echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"
+          fi
+
+      - name: Bundle agent runtime
+        shell: bash
+        run: |
+          npm pack @openai/codex@0.137.0-darwin-arm64 --silent
+          pkg="$(ls openai-codex-*-darwin-arm64.tgz | head -1)"
+          if [[ -z "$pkg" ]]; then
+            echo "Failed to download @openai/codex macOS native package" >&2
+            exit 1
+          fi
+          mkdir -p .ci/macos-runtime app/resources/bin
+          tar -xzf "$pkg"
+          cp package/vendor/aarch64-apple-darwin/bin/codex .ci/macos-runtime/deskagent-core
+          cp .ci/macos-runtime/deskagent-core app/resources/bin/deskagent-core
+          cp package/vendor/aarch64-apple-darwin/codex-package.json app/resources/codex-package.json
+          rm -rf app/resources/codex-resources app/resources/codex-path
+          cp -R package/vendor/aarch64-apple-darwin/codex-resources app/resources/codex-resources
+          cp -R package/vendor/aarch64-apple-darwin/codex-path app/resources/codex-path
+          chmod +x .ci/macos-runtime/deskagent-core app/resources/bin/deskagent-core
+          ls -lh .ci/macos-runtime/deskagent-core app/resources/bin/deskagent-core
+
+      - name: Build OS helper
+        working-directory: native/os-tools
+        run: cargo build --release
+
+      - name: Build membership server
+        run: cargo build --release --manifest-path server/Cargo.toml
+
+      - name: Verify macOS binaries
+        shell: bash
+        run: |
+          required=(
+            ".ci/macos-runtime/deskagent-core"
+            "native/os-tools/target/release/deskagent-os-tools"
+            "server/target/release/deskagent-server"
+            "app/resources/codex-package.json"
+            "app/resources/codex-resources/codex-command-runner"
+            "app/resources/codex-path/rg"
+          )
+          for file in "${required[@]}"; do
+            test -e "$file" || { echo "Missing macOS build input: $file" >&2; exit 1; }
+          done
+
+      - name: Build macOS app
+        working-directory: app
+        env:
+          DESKAGENT_RUNTIME_BIN: ${{ github.workspace }}/.ci/macos-runtime/deskagent-core
+          DESKAGENT_OS_TOOLS_BIN: ${{ github.workspace }}/native/os-tools/target/release/deskagent-os-tools
+          DESKAGENT_SERVER_BIN: ${{ github.workspace }}/server/target/release/deskagent-server
+        run: npm run dist:mac
+
+      - name: Verify release artifacts
+        shell: bash
+        run: |
+          app_path="app/release/mac-arm64/智界桌面助手.app"
+          dmg_path="app/release/智界桌面助手-0.1.0-arm64.dmg"
+          codesign --verify --deep --strict --verbose=4 "$app_path"
+          hdiutil verify "$dmg_path"
+          if [[ -n "${CSC_LINK:-}" ]]; then
+            spctl -a -vvv -t exec "$app_path"
+            spctl -a -vvv -t open "$dmg_path"
+          else
+            spctl -a -vvv -t exec "$app_path" || true
+          fi
+
+      - name: List release outputs
+        run: ls -lh app/release
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deskagent-macos-${{ github.ref_name }}
+          path: |
+            app/release/*-arm64.dmg
+            app/release/*-arm64.dmg.blockmap
+            app/release/*-arm64.zip
+            app/release/*-arm64.zip.blockmap
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: github.event_name == 'release' || inputs.upload_to_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || inputs.release_tag || github.ref_name }}
+          overwrite_files: true
+          files: |
+            app/release/*-arm64.dmg
+            app/release/*-arm64.dmg.blockmap
+            app/release/*-arm64.zip
+            app/release/*-arm64.zip.blockmap

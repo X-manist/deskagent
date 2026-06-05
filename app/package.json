@@ -99,6 +99,7 @@
       ],
       "category": "Utility",
       "artifactName": "智界桌面助手-${version}.${ext}"
-    }
+    },
+    "afterPack": "scripts/after-pack.js"
   }
 }
