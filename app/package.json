@@ -83,7 +83,7 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "智界桌面助手-${version}-setup.${ext}"
+      "artifactName": "deskagent-${version}-setup.${ext}"
     },
     "nsis": {
       "oneClick": true,
