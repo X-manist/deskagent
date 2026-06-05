@@ -1,4 +1,10 @@
-const BASE = import.meta.env.VITE_API_BASE || '';
+function defaultBase() {
+  const path = window.location.pathname || '';
+  if (path.startsWith('/deskagent/admin')) return '/deskagent';
+  return '';
+}
+
+const BASE = (import.meta.env.VITE_API_BASE || defaultBase()).replace(/\/+$/, '');
 
 export function getToken() {
   return localStorage.getItem('admin_token') || '';

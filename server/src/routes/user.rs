@@ -14,6 +14,7 @@ pub fn router() -> Router<AppState> {
         .route("/auth/sms/send", post(sms_send))
         .route("/auth/sms/verify", post(sms_verify))
         .route("/api/me", get(me))
+        .route("/api/models", get(models))
         .route("/api/packages", get(packages))
 }
 
@@ -216,6 +217,13 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
 async fn me(State(st): State<AppState>, user: AuthUser) -> AppResult<Json<serde_json::Value>> {
     let payload = me_payload(&st, user.0.sub).await?;
     Ok(Json(payload))
+}
+
+async fn models(State(st): State<AppState>) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(json!({
+        "models": st.cfg.public_models(),
+        "default_model": st.cfg.default_model,
+    })))
 }
 
 async fn packages(State(st): State<AppState>) -> AppResult<Json<serde_json::Value>> {

@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld('api', {
       'chat:historyLoaded',
       'auth:state',
       'remote:state',
+      'settings:updated',
       'workspace:changed',
     ];
     if (allowed.includes(channel)) ipcRenderer.on(channel, (_e, payload) => cb(payload));

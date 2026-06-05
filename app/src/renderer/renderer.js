@@ -47,6 +47,7 @@ let engineReady = false;
 const conversations = new Map(); // threadId -> { id, items:[], busy, streamItemId }
 let activeId = null;
 const activeBubbles = new Map(); // itemId -> DOM bubble (active conversation only)
+const activeActivities = new Map(); // itemId -> DOM activity body (active conversation only)
 let sessionsLoaded = false;
 let preparingSend = false;
 let activeConversationPromise = null;
@@ -213,6 +214,7 @@ function makeActivityEl(kind, text) {
     summary.textContent = '思考中';
     body.className = 'activity-body';
     body.textContent = text || '';
+    el._activityBody = body;
     details.appendChild(summary);
     details.appendChild(body);
     el.appendChild(details);
@@ -230,7 +232,9 @@ function appendItemDom(item) {
     messagesEl.appendChild(wrap);
     if (item.itemId) activeBubbles.set(item.itemId, bubble);
   } else if (item.kind === 'activity') {
-    messagesEl.appendChild(makeActivityEl(item.activityKind, item.display));
+    const el = makeActivityEl(item.activityKind, item.display);
+    messagesEl.appendChild(el);
+    if (item.itemId) activeActivities.set(item.itemId, el._activityBody || el);
   }
   scrollToBottom();
 }
@@ -239,6 +243,7 @@ function appendItemDom(item) {
 function renderActive() {
   messagesEl.innerHTML = '';
   activeBubbles.clear();
+  activeActivities.clear();
   const conv = activeConv();
   if (!conv || !conv.items.length) {
     showWelcome();
@@ -250,7 +255,9 @@ function renderActive() {
       messagesEl.appendChild(wrap);
       if (item.itemId) activeBubbles.set(item.itemId, bubble);
     } else if (item.kind === 'activity') {
-      messagesEl.appendChild(makeActivityEl(item.activityKind, item.display));
+      const el = makeActivityEl(item.activityKind, item.display);
+      messagesEl.appendChild(el);
+      if (item.itemId) activeActivities.set(item.itemId, el._activityBody || el);
     }
   }
   scrollToBottom();
@@ -803,14 +810,33 @@ window.api.on('chat:message', (p) => {
 });
 
 window.api.on('chat:activity', (p) => {
-  if (p.phase !== 'completed' && p.phase !== 'started') return;
   // Keep the chat transcript user-facing: hide internal command/MCP tool names.
   if (p.kind === 'file' && p.phase !== 'completed') return;
-  if (p.kind === 'reasoning' && p.phase !== 'completed') return;
   if (p.kind !== 'file' && p.kind !== 'reasoning') return;
   const conv = getConv(p.threadId);
   if (!conv) return;
-  pushItem(conv, { kind: 'activity', activityKind: p.kind, display: activityDisplay(p) });
+  let item = p.itemId && conv.items.find((it) => it.kind === 'activity' && it.itemId === p.itemId);
+  const display = activityDisplay(p);
+  if (!item) {
+    item = {
+      kind: 'activity',
+      activityKind: p.kind,
+      display,
+      itemId: p.itemId,
+    };
+    pushItem(conv, item);
+    return;
+  }
+  if (display || p.phase === 'completed') item.display = display;
+  if (conv.id === activeId) {
+    const body = p.itemId && activeActivities.get(p.itemId);
+    if (body) {
+      body.textContent = item.display || '';
+      scrollToBottom();
+    } else {
+      renderActive();
+    }
+  }
 });
 
 window.api.on('chat:turnState', (p) => {
@@ -1139,6 +1165,7 @@ $('#logoutBtn').addEventListener('click', async () => {
 
 window.api.on('auth:state', (p) => setLoggedIn(p));
 window.api.on('remote:state', renderRemoteState);
+window.api.on('settings:updated', (p) => setModelTag(p));
 
 // Initialize auth state on load.
 window.api.auth.status().then(setLoggedIn).catch(() => setLoggedIn({ loggedIn: false }));

@@ -291,6 +291,7 @@ class Engine extends EventEmitter {
       model: s.model,
       token: this.adapterToken,
       passthrough: this.passthrough,
+      preferWebSocket: !this.passthrough && process.env.DESKAGENT_DISABLE_BACKEND_WS !== '1',
       log: (...a) => this.emit('log', 'adapter', a.join(' ')),
     });
     await new Promise((resolve, reject) => {
@@ -721,6 +722,26 @@ class Engine extends EventEmitter {
         this.emit('delta', { threadId, itemId: uiItemId, sourceItemId: itemId, delta: params.delta || '', text: next });
         break;
       }
+      case 'item/reasoning/summaryTextDelta':
+      case 'item/reasoning/textDelta': {
+        const itemId = params.itemId || params.item_id;
+        const uiItemId = this._uiItemId(threadId, itemId || 'reasoning');
+        const key = `${threadId}:${uiItemId}:reasoning`;
+        const delta = params.delta || '';
+        const prev = this.deltaItems.get(key) || '';
+        const next = prev + delta;
+        this.deltaItems.set(key, next);
+        this.emit('activity', {
+          threadId,
+          kind: 'reasoning',
+          phase: 'delta',
+          itemId: uiItemId,
+          sourceItemId: itemId,
+          delta,
+          text: next,
+        });
+        break;
+      }
       case 'item/completed':
         this._emitItem(params.item, 'completed', threadId);
         break;
@@ -795,8 +816,16 @@ class Engine extends EventEmitter {
         status: item.status,
         files: (item.changes || []).map((c) => c.path),
       });
-    } else if (t === 'reasoning' && phase === 'completed') {
-      this.emit('activity', { threadId, kind: 'reasoning', phase, text: reasoningSummaryText(item.summary) || itemText });
+    } else if (t === 'reasoning') {
+      const text = reasoningSummaryText(item.summary) || itemText;
+      this.emit('activity', {
+        threadId,
+        kind: 'reasoning',
+        phase,
+        itemId: this._uiItemId(threadId, item.id || 'reasoning'),
+        sourceItemId: item.id,
+        text,
+      });
     }
   }
 

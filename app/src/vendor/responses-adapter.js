@@ -16,6 +16,7 @@
  */
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const { URL } = require('url');
 
 function genId(prefix) {
@@ -126,6 +127,8 @@ function makeResponsesWriter(res, responseId) {
     res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`);
   }
   let itemOpen = false;
+  let reasoningOpen = false;
+  let outputIndex = 0;
   function ensureItemOpen() {
     if (itemOpen) return;
     itemOpen = true;
@@ -137,6 +140,15 @@ function makeResponsesWriter(res, responseId) {
       item: { id: 'msg_0', type: 'message', status: 'in_progress', role: 'assistant', content: [] },
     });
   }
+  function ensureReasoningOpen() {
+    if (reasoningOpen) return;
+    reasoningOpen = true;
+    outputIndex += 1;
+    send('response.output_item.added', {
+      output_index: outputIndex,
+      item: { id: 'rs_0', type: 'reasoning', status: 'in_progress', summary: [], content: [] },
+    });
+  }
   return {
     created() {
       send('response.created', { response: { id: responseId, object: 'response', status: 'in_progress' } });
@@ -146,6 +158,12 @@ function makeResponsesWriter(res, responseId) {
       ensureItemOpen();
       send('response.output_text.delta', { item_id: 'msg_0', output_index: 0, content_index: 0, delta });
     },
+    reasoningDelta(delta) {
+      if (!delta) return;
+      ensureReasoningOpen();
+      send('response.reasoning_text.delta', { item_id: 'rs_0', output_index: outputIndex, content_index: 0, delta });
+      send('response.reasoning_summary_text.delta', { item_id: 'rs_0', output_index: outputIndex, summary_index: 0, delta });
+    },
     messageDone(text) {
       ensureItemOpen();
       send('response.output_item.done', {
@@ -153,11 +171,12 @@ function makeResponsesWriter(res, responseId) {
         item: { id: 'msg_0', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: text || '' }] },
       });
     },
-    reasoningDone(text, outputIndex) {
+    reasoningDone(text, doneOutputIndex) {
       const value = String(text || '').trim();
       if (!value) return;
+      ensureReasoningOpen();
       send('response.output_item.done', {
-        output_index: outputIndex,
+        output_index: doneOutputIndex || outputIndex,
         item: {
           id: 'rs_0',
           type: 'reasoning',
@@ -225,6 +244,209 @@ function postUpstream(baseUrl, apiKey, body) {
   });
 }
 
+function encodeMaskedWsFrame(text) {
+  const payload = Buffer.from(String(text));
+  const mask = crypto.randomBytes(4);
+  let head;
+  if (payload.length < 126) {
+    head = Buffer.from([0x81, 0x80 | payload.length]);
+  } else if (payload.length <= 0xffff) {
+    head = Buffer.alloc(4);
+    head[0] = 0x81;
+    head[1] = 0x80 | 126;
+    head.writeUInt16BE(payload.length, 2);
+  } else {
+    head = Buffer.alloc(10);
+    head[0] = 0x81;
+    head[1] = 0x80 | 127;
+    head.writeBigUInt64BE(BigInt(payload.length), 2);
+  }
+  const masked = Buffer.alloc(payload.length);
+  for (let i = 0; i < payload.length; i += 1) masked[i] = payload[i] ^ mask[i % 4];
+  return Buffer.concat([head, mask, masked]);
+}
+
+function createWsParser(onText, onClose) {
+  let buffer = Buffer.alloc(0);
+  return (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (buffer.length >= 2) {
+      const b0 = buffer[0];
+      const opcode = b0 & 0x0f;
+      const masked = (buffer[1] & 0x80) !== 0;
+      let len = buffer[1] & 0x7f;
+      let offset = 2;
+      if (len === 126) {
+        if (buffer.length < offset + 2) return;
+        len = buffer.readUInt16BE(offset);
+        offset += 2;
+      } else if (len === 127) {
+        if (buffer.length < offset + 8) return;
+        const n = buffer.readBigUInt64BE(offset);
+        if (n > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('websocket frame too large');
+        len = Number(n);
+        offset += 8;
+      }
+      let mask;
+      if (masked) {
+        if (buffer.length < offset + 4) return;
+        mask = buffer.slice(offset, offset + 4);
+        offset += 4;
+      }
+      if (buffer.length < offset + len) return;
+      let payload = buffer.slice(offset, offset + len);
+      buffer = buffer.slice(offset + len);
+      if (masked) {
+        const unmasked = Buffer.alloc(payload.length);
+        for (let i = 0; i < payload.length; i += 1) unmasked[i] = payload[i] ^ mask[i % 4];
+        payload = unmasked;
+      }
+      if (opcode === 0x1) onText(payload.toString('utf8'));
+      else if (opcode === 0x8) {
+        if (onClose) onClose();
+        return;
+      } else if (opcode === 0x9) {
+        // Ping from server; respond with pong.
+      }
+    }
+  };
+}
+
+function upstreamWsUrl(baseUrl, endpoint) {
+  const url = new URL(baseUrl.replace(/\/$/, '') + endpoint);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url;
+}
+
+function streamChatOverWebSocket(baseUrl, apiKey, body, writer, log) {
+  const url = upstreamWsUrl(baseUrl, '/chat/completions/ws');
+  const mod = url.protocol === 'wss:' ? https : http;
+  const key = crypto.randomBytes(16).toString('base64');
+  const headers = {
+    Host: url.host,
+    Upgrade: 'websocket',
+    Connection: 'Upgrade',
+    'Sec-WebSocket-Key': key,
+    'Sec-WebSocket-Version': '13',
+    Authorization: `Bearer ${apiKey}`,
+  };
+  return new Promise((resolve, reject) => {
+    let fullText = '';
+    let reasoningText = '';
+    let usage = null;
+    const toolCalls = []; // index -> {id,name,arguments}
+    let done = false;
+    let settled = false;
+    let handshakeTimer;
+    const req = mod.request({
+      method: 'GET',
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'wss:' ? 443 : 80),
+      path: url.pathname + url.search,
+      headers,
+    });
+    function fail(err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(handshakeTimer);
+      req.destroy();
+      reject(err);
+    }
+    function finish(socket) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(handshakeTimer);
+      const hasMessage = !!fullText;
+      const hasReasoning = !!String(reasoningText || '').trim();
+      if (hasMessage) writer.messageDone(fullText);
+      if (hasReasoning) writer.reasoningDone(reasoningText);
+      let idx = (hasMessage ? 1 : 0) + (hasReasoning ? 1 : 0);
+      if (idx < 1) idx = 1;
+      for (const c of toolCalls) {
+        if (c && (c.name || c.arguments)) writer.functionCallDone(c, idx++);
+      }
+      writer.completed(usage);
+      try { socket.end(); } catch (_) {}
+      resolve();
+    }
+    req.on('upgrade', (_res, socket) => {
+      clearTimeout(handshakeTimer);
+      let lineBuffer = '';
+      const parser = createWsParser((line) => {
+        lineBuffer += String(line || '');
+        let nl;
+        while ((nl = lineBuffer.indexOf('\n')) !== -1) {
+          const value = lineBuffer.slice(0, nl).trim();
+          lineBuffer = lineBuffer.slice(nl + 1);
+          if (!value) continue;
+          if (value.startsWith('{')) {
+            try {
+              const msg = JSON.parse(value);
+              if (msg.type === 'done') {
+                done = true;
+                finish(socket);
+                return;
+              }
+              if (msg.type === 'error') {
+                fail(new Error((msg.error && msg.error.message) || 'websocket upstream error'));
+                return;
+              }
+            } catch (_) {}
+          }
+          if (!value.startsWith('data:')) continue;
+          const payload = value.slice(5).trim();
+          if (!payload || payload === '[DONE]') {
+            done = true;
+            finish(socket);
+            return;
+          }
+          try {
+            const obj = JSON.parse(payload);
+            if (obj.usage) usage = obj.usage;
+            const choice = obj.choices && obj.choices[0];
+            const delta = choice && choice.delta ? choice.delta : {};
+            if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+              reasoningText += delta.reasoning_content;
+              writer.reasoningDelta(delta.reasoning_content);
+            }
+            if (typeof delta.content === 'string' && delta.content) {
+              fullText += delta.content;
+              writer.outputTextDelta(delta.content);
+            }
+            if (Array.isArray(delta.tool_calls)) {
+              for (const tc of delta.tool_calls) {
+                const i = tc.index != null ? tc.index : 0;
+                if (!toolCalls[i]) toolCalls[i] = { id: tc.id, name: '', arguments: '' };
+                if (tc.id) toolCalls[i].id = tc.id;
+                if (tc.function) {
+                  if (tc.function.name) toolCalls[i].name = tc.function.name;
+                  if (tc.function.arguments) toolCalls[i].arguments += tc.function.arguments;
+                }
+              }
+            }
+          } catch (e) {
+            log && log('ws parse error', e && e.message);
+          }
+        }
+      }, () => {
+        if (!done) finish(socket);
+      });
+      socket.on('data', parser);
+      socket.on('error', fail);
+      socket.on('end', () => {
+        if (!settled) finish(socket);
+      });
+      socket.write(encodeMaskedWsFrame(JSON.stringify(body)));
+    });
+    req.on('response', (res) => {
+      fail(new Error(`websocket upgrade failed (${res.statusCode})`));
+    });
+    req.on('error', fail);
+    handshakeTimer = setTimeout(() => fail(new Error('websocket upgrade timeout')), 3000);
+    req.end();
+  });
+}
+
 // ---- Transparent Responses passthrough -------------------------------------
 // When the upstream relay natively speaks the OpenAI Responses API we forward the
 // runtime's request verbatim and only swap the Authorization header. This keeps
@@ -276,7 +498,7 @@ async function streamTranslate(upstreamResp, writer) {
       const hasMessage = !!fullText;
       const hasReasoning = !!String(reasoningText || '').trim();
       if (hasMessage) writer.messageDone(fullText);
-      if (hasReasoning) writer.reasoningDone(reasoningText, hasMessage ? 1 : 0);
+      if (hasReasoning) writer.reasoningDone(reasoningText);
       let idx = (hasMessage ? 1 : 0) + (hasReasoning ? 1 : 0);
       if (idx < 1) idx = 1;
       for (const c of toolCalls) {
@@ -293,6 +515,7 @@ async function streamTranslate(upstreamResp, writer) {
       const delta = choice.delta || {};
       if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
         reasoningText += delta.reasoning_content;
+        writer.reasoningDelta(delta.reasoning_content);
       }
       if (typeof delta.content === 'string' && delta.content) {
         fullText += delta.content;
@@ -343,6 +566,7 @@ async function streamTranslate(upstreamResp, writer) {
  * @param {function():string} opts.getApiKey - returns upstream bearer key
  * @param {string} [opts.token] - per-session bearer token the adapter requires
  * @param {boolean} [opts.passthrough] - forward /responses verbatim (relay is Responses-native)
+ * @param {boolean} [opts.preferWebSocket] - use /chat/completions/ws in translate mode when available
  * @param {string} [opts.model] - force a model override (translate mode only)
  * @param {function} [opts.log]
  */
@@ -418,6 +642,15 @@ function createAdapterServer(opts) {
       try {
         const chatReq = buildChatRequest(reqBody, opts.model);
         log('upstream chat request', { model: chatReq.model, messages: chatReq.messages.length, tools: (chatReq.tools || []).length });
+        if (opts.preferWebSocket) {
+          try {
+            await streamChatOverWebSocket(opts.upstreamBaseUrl, opts.getApiKey(), chatReq, writer, log);
+            res.end();
+            return;
+          } catch (e) {
+            log('websocket fallback to http sse', e && e.message);
+          }
+        }
         const upstream = await postUpstream(opts.upstreamBaseUrl, opts.getApiKey(), chatReq);
         if (upstream.statusCode >= 400) {
           let errBody = '';

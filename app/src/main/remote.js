@@ -72,6 +72,36 @@ function js(res, body) {
   res.end(bytes);
 }
 
+function wsAcceptKey(key) {
+  return crypto
+    .createHash('sha1')
+    .update(String(key || '') + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+    .digest('base64');
+}
+
+function wsTextFrame(text) {
+  const payload = Buffer.from(String(text));
+  if (payload.length < 126) {
+    return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  }
+  if (payload.length <= 0xffff) {
+    const head = Buffer.alloc(4);
+    head[0] = 0x81;
+    head[1] = 126;
+    head.writeUInt16BE(payload.length, 2);
+    return Buffer.concat([head, payload]);
+  }
+  const head = Buffer.alloc(10);
+  head[0] = 0x81;
+  head[1] = 127;
+  head.writeBigUInt64BE(BigInt(payload.length), 2);
+  return Buffer.concat([head, payload]);
+}
+
+function wsCloseFrame() {
+  return Buffer.from([0x88, 0x00]);
+}
+
 function notFound(res) {
   json(res, 404, { ok: false, error: 'not_found' });
 }
@@ -174,47 +204,71 @@ function remotePageHtml() {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>智界助手直连控制</title>
   <style>
-    :root { color-scheme: light dark; --bg:#f4efd9; --paper:#fffdf5; --paper2:rgba(255,253,245,.72); --line:rgba(67,82,55,.18); --text:#20241f; --muted:#6f7566; --accent:#4f8d43; --danger:#aa584a; --gold:#b39150; }
+    :root { color-scheme: light dark; --bg:#f6f7fb; --surface:#ffffff; --surface2:#f1f4f9; --line:#d9dfeb; --text:#171b22; --muted:#667085; --accent:#2563eb; --accent2:#0f766e; --danger:#dc2626; --shadow:0 20px 50px rgba(18,24,40,.10); }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; overflow-x:hidden; font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; color:var(--text); background:linear-gradient(140deg,#fffdf5,var(--bg)); }
-    main { width:min(1040px,100%); margin:0 auto; padding:16px; }
-    header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
-    h1 { margin:0; font-size:22px; line-height:1.25; }
-    .actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
-    .pill, .ghost { padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--muted); background:var(--paper2); font-size:12px; }
-    .ghost { cursor:pointer; color:var(--text); }
-    .layout { display:grid; grid-template-columns:minmax(200px,280px) minmax(0,1fr); gap:12px; align-items:stretch; }
-    .panel { border:1px solid var(--line); border-radius:12px; background:rgba(255,253,245,.86); box-shadow:0 18px 42px rgba(86,75,40,.12); overflow:hidden; min-width:0; }
-    .side { display:flex; flex-direction:column; min-height:66vh; }
+    html, body { min-height:100%; }
+    body { margin:0; min-height:100svh; overflow:hidden; font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; color:var(--text); background:var(--bg); }
+    main { height:100svh; width:min(1180px,100%); margin:0 auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+    header { flex:0 0 auto; min-height:48px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .title-row { display:flex; align-items:center; gap:8px; min-width:0; }
+    h1 { margin:0; font-size:18px; line-height:1.25; white-space:nowrap; }
+    .actions { display:flex; gap:8px; align-items:center; justify-content:flex-end; }
+    .pill, .ghost, .icon { padding:7px 10px; border:1px solid var(--line); border-radius:8px; color:var(--muted); background:var(--surface); font-size:12px; }
+    .ghost, .icon { cursor:pointer; color:var(--text); font-weight:650; }
+    .icon { min-width:42px; display:none; }
+    .layout { flex:1; min-height:0; display:grid; grid-template-columns:288px minmax(0,1fr); gap:10px; align-items:stretch; }
+    .panel { border:1px solid var(--line); border-radius:10px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden; min-width:0; }
+    .side { display:flex; flex-direction:column; min-height:0; }
     .side-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:12px; border-bottom:1px solid var(--line); }
-    .side-title { font-size:13px; font-weight:700; color:var(--muted); }
+    .side-title { font-size:13px; font-weight:750; color:var(--muted); }
     .sessions { padding:8px; overflow:auto; display:flex; flex-direction:column; gap:7px; }
     .session { width:100%; text-align:left; color:var(--text); background:transparent; border:1px solid transparent; border-radius:8px; padding:9px; cursor:pointer; }
-    .session.active { border-color:var(--line); background:var(--paper2); }
-    .session-title { font-size:13px; line-height:1.35; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+    .session.active { border-color:rgba(37,99,235,.28); background:#eff6ff; }
+    .session-title { font-size:14px; line-height:1.38; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
     .session-meta { margin-top:4px; color:var(--muted); font-size:11px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-    .status { padding:13px 14px; border-bottom:1px solid var(--line); color:var(--muted); font-size:13px; }
-    .messages { min-height:56vh; max-height:68vh; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
-    .msg { max-width:88%; padding:10px 12px; border-radius:10px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; }
-    .me { align-self:flex-end; background:var(--accent); color:white; }
-    .ai { align-self:flex-start; border:1px solid var(--line); background:rgba(255,255,255,.58); }
-    .sys { align-self:flex-start; border:1px solid var(--line); background:rgba(255,255,255,.5); color:var(--muted); }
-    .streaming::after { content:""; display:inline-block; width:6px; height:1em; margin-left:3px; vertical-align:-2px; background:var(--gold); animation:blink 1s steps(2,end) infinite; }
+    .chat { display:flex; flex-direction:column; min-height:0; }
+    .status { flex:0 0 auto; padding:12px 14px; border-bottom:1px solid var(--line); color:var(--muted); font-size:13px; }
+    .messages { flex:1; min-height:0; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:10px; background:var(--surface2); }
+    .msg { max-width:82%; padding:10px 12px; border-radius:14px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; font-size:15px; }
+    .me { align-self:flex-end; background:var(--accent); color:white; border-bottom-right-radius:5px; }
+    .ai { align-self:flex-start; border:1px solid var(--line); background:var(--surface); border-bottom-left-radius:5px; }
+    .sys { align-self:center; max-width:100%; border:1px solid var(--line); background:var(--surface); color:var(--muted); font-size:13px; }
+    .streaming::after { content:""; display:inline-block; width:6px; height:1em; margin-left:3px; vertical-align:-2px; background:var(--accent2); animation:blink 1s steps(2,end) infinite; }
     @keyframes blink { 0%,45%{opacity:1} 46%,100%{opacity:0} }
-    form { display:flex; gap:9px; padding:12px; border-top:1px solid var(--line); }
-    textarea { flex:1; min-height:48px; max-height:140px; resize:vertical; padding:10px 11px; border:1px solid var(--line); border-radius:10px; color:var(--text); background:white; font:inherit; line-height:1.45; }
+    form { flex:0 0 auto; display:flex; gap:9px; padding:10px; border-top:1px solid var(--line); background:var(--surface); }
+    textarea { flex:1; min-height:48px; max-height:140px; resize:vertical; padding:10px 11px; border:1px solid var(--line); border-radius:10px; color:var(--text); background:var(--surface); font:inherit; font-size:16px; line-height:1.45; }
     button { flex:0 0 auto; min-width:76px; border:0; border-radius:10px; color:white; background:var(--accent); font:inherit; font-weight:700; cursor:pointer; }
-    button.ghost { min-width:auto; border:1px solid var(--line); color:var(--text); background:var(--paper2); font-weight:650; }
+    button.ghost { min-width:auto; border:1px solid var(--line); color:var(--text); background:var(--surface); font-weight:650; }
     button:disabled { opacity:.58; cursor:not-allowed; }
     .err { color:var(--danger); }
-    @media (max-width:720px) { main{padding:12px} header{align-items:flex-start; flex-direction:column} .actions{justify-content:flex-start} .layout{grid-template-columns:1fr} .side{min-height:auto; max-height:28vh} .messages{min-height:48vh; max-height:56vh} .msg{max-width:94%} }
-    @media (prefers-color-scheme: dark) { :root { --bg:#0f1210; --paper:#171b17; --paper2:rgba(31,36,31,.72); --line:rgba(220,225,205,.16); --text:#ece9de; --muted:#a9ad9e; --accent:#779d62; --gold:#d8b46a; } body{background:linear-gradient(140deg,#171b17,#0f1210)} .panel{background:rgba(23,27,23,.88)} textarea{background:#111510} .ai,.sys{background:rgba(255,255,255,.045)} }
+    .drawer-backdrop { display:none; }
+    @media (max-width:720px) {
+      main{width:100%;padding:0;gap:0}
+      header{height:52px;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--surface)}
+      h1{font-size:17px}
+      .icon{display:inline-flex;align-items:center;justify-content:center}
+      .actions{gap:6px}
+      .actions .ghost{display:none}
+      .layout{display:block;position:relative;min-height:0}
+      .side{position:fixed;z-index:20;inset:0 auto 0 0;width:min(82vw,320px);border-radius:0;border-left:0;box-shadow:0 24px 80px rgba(18,24,40,.22);transform:translateX(-105%);transition:transform .18s ease}
+      body.drawer-open .side{transform:translateX(0)}
+      .drawer-backdrop{position:fixed;z-index:19;inset:0;background:rgba(15,23,42,.36)}
+      body.drawer-open .drawer-backdrop{display:block}
+      .chat{height:calc(100svh - 52px);border:0;border-radius:0;box-shadow:none}
+      .messages{padding:12px}
+      .msg{max-width:92%;font-size:15px}
+      form{padding:10px max(10px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left))}
+    }
+    @media (prefers-color-scheme: dark) { :root { --bg:#101318; --surface:#171b22; --surface2:#11151b; --line:#2b3442; --text:#eef2f7; --muted:#98a2b3; --accent:#3b82f6; --accent2:#2dd4bf; --shadow:none; } .session.active{background:#172554} textarea{background:#11151b} }
   </style>
 </head>
 <body>
   <main>
     <header>
-      <h1>智界助手直连控制</h1>
+      <div class="title-row">
+        <button class="icon" id="toggleHistory" type="button">历史</button>
+        <h1>智界助手</h1>
+      </div>
       <div class="actions">
         <button class="ghost" id="newSession" type="button">新建会话</button>
         <button class="ghost" id="refreshSessions" type="button">刷新历史</button>
@@ -229,7 +283,7 @@ function remotePageHtml() {
         </div>
         <div class="sessions" id="sessions"></div>
       </aside>
-      <section class="panel">
+      <section class="panel chat">
         <div class="status" id="status">正在建立加密直连…</div>
         <div class="messages" id="messages"></div>
         <form id="form">
@@ -238,6 +292,7 @@ function remotePageHtml() {
         </form>
       </section>
     </div>
+    <div class="drawer-backdrop" id="drawerBackdrop"></div>
   </main>
   <script src="/vendor/tweetnacl.min.js"></script>
   <script>
@@ -255,6 +310,8 @@ function remotePageHtml() {
     const sendEl = document.getElementById('send');
     const newSessionEl = document.getElementById('newSession');
     const refreshSessionsEl = document.getElementById('refreshSessions');
+    const toggleHistoryEl = document.getElementById('toggleHistory');
+    const drawerBackdropEl = document.getElementById('drawerBackdrop');
     let keyBytes;
     let currentThreadId = '';
     let activeTurnId = '';
@@ -263,6 +320,10 @@ function remotePageHtml() {
     let polling = false;
     const enc = new TextEncoder();
     const dec = new TextDecoder();
+
+    function setDrawer(open) {
+      document.body.classList.toggle('drawer-open', !!open);
+    }
 
     function b64ToBytes(value) {
       const normalized = value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4);
@@ -356,7 +417,10 @@ function remotePageHtml() {
         btn.innerHTML = '<div class="session-title"></div><div class="session-meta"></div>';
         btn.querySelector('.session-title').textContent = session.preview || '新会话';
         btn.querySelector('.session-meta').textContent = (fmtTime(session.updated_at || session.created_at) || '最近') + ' · ' + String(session.id || '').slice(0, 8);
-        btn.addEventListener('click', () => openHistory(session.id));
+        btn.addEventListener('click', () => {
+          setDrawer(false);
+          openHistory(session.id);
+        });
         sessionsEl.appendChild(btn);
       }
       setCurrentThread(currentThreadId);
@@ -390,6 +454,7 @@ function remotePageHtml() {
       add('已新建会话。', 'sys');
       statusEl.textContent = '新会话已就绪';
       await loadSessions();
+      setDrawer(false);
     }
     function ensureAiBubble() {
       if (activeAiEl) return activeAiEl;
@@ -400,6 +465,85 @@ function remotePageHtml() {
       messagesEl.scrollTop = messagesEl.scrollHeight;
       return activeAiEl;
     }
+    function handleTurnEvent(event) {
+      if (event.type === 'accepted') {
+        statusEl.textContent = event.message || '桌面助手已接收任务';
+      } else if (event.type === 'thread_changed') {
+        setCurrentThread(event.thread_id);
+      } else if (event.type === 'delta') {
+        const raw = event.text || ((activeAiEl && activeAiEl.dataset.rawText) || '') + (event.delta || '');
+        const visibleText = stripThinkText(raw);
+        if (visibleText.trim()) {
+          const bubble = ensureAiBubble();
+          bubble.dataset.rawText = raw;
+          bubble.textContent = visibleText;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+      } else if (event.type === 'message') {
+        const visibleText = stripThinkText(event.text || '');
+        if (visibleText.trim()) {
+          ensureAiBubble().textContent = visibleText;
+          activeAiEl.classList.remove('streaming');
+        }
+      } else if (event.type === 'error') {
+        add(event.message || '远程任务失败', 'sys err');
+        return true;
+      } else if (event.type === 'done') {
+        return true;
+      }
+      return false;
+    }
+    function wsUrl(turnId) {
+      const url = new URL('/api/remote/direct/ws', location.href);
+      url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      url.searchParams.set('code', code);
+      url.searchParams.set('turn_id', turnId);
+      return url.toString();
+    }
+    function streamTurnSocket(turnId) {
+      return new Promise((resolve, reject) => {
+        if (!window.WebSocket) return reject(new Error('WebSocket 不可用'));
+        let opened = false;
+        let done = false;
+        const ws = new WebSocket(wsUrl(turnId));
+        const timer = setTimeout(() => {
+          if (!opened) {
+            try { ws.close(); } catch (_) {}
+            reject(new Error('WebSocket 连接超时'));
+          }
+        }, 900);
+        ws.addEventListener('open', () => {
+          opened = true;
+          clearTimeout(timer);
+          stateEl.textContent = '已加密连接 · WS';
+        });
+        ws.addEventListener('message', async (event) => {
+          try {
+            const outer = JSON.parse(event.data);
+            const payload = await decryptJson(outer.msg);
+            if (payload.thread_id) setCurrentThread(payload.thread_id);
+            activeSeq = payload.next_seq || activeSeq;
+            if (payload.event && handleTurnEvent(payload.event)) {
+              done = true;
+              try { ws.close(); } catch (_) {}
+              resolve();
+            }
+          } catch (err) {
+            done = true;
+            try { ws.close(); } catch (_) {}
+            reject(err);
+          }
+        });
+        ws.addEventListener('error', () => {
+          if (!opened) reject(new Error('WebSocket 连接失败'));
+        });
+        ws.addEventListener('close', () => {
+          clearTimeout(timer);
+          if (!opened) return;
+          if (!done) reject(new Error('WebSocket 连接已断开'));
+        });
+      });
+    }
     async function pollTurn(turnId) {
       if (!turnId || polling) return;
       polling = true;
@@ -409,36 +553,18 @@ function remotePageHtml() {
       let done = false;
       let failed = false;
       try {
+        try {
+          await streamTurnSocket(turnId);
+          done = true;
+        } catch (_) {
+          stateEl.textContent = '已加密连接 · HTTP';
+        }
         while (!done && activeTurnId === turnId) {
           const payload = await secure('/api/remote/direct/events', { t:'events', turn_id:turnId, since_seq:activeSeq, at:Date.now() });
           activeSeq = payload.next_seq || activeSeq;
           if (payload.thread_id) setCurrentThread(payload.thread_id);
           for (const event of payload.events || []) {
-            if (event.type === 'accepted') {
-              statusEl.textContent = event.message || '桌面助手已接收任务';
-            } else if (event.type === 'thread_changed') {
-              setCurrentThread(event.thread_id);
-            } else if (event.type === 'delta') {
-              const raw = event.text || ((activeAiEl && activeAiEl.dataset.rawText) || '') + (event.delta || '');
-              const visibleText = stripThinkText(raw);
-              if (visibleText.trim()) {
-                const bubble = ensureAiBubble();
-                bubble.dataset.rawText = raw;
-                bubble.textContent = visibleText;
-                messagesEl.scrollTop = messagesEl.scrollHeight;
-              }
-            } else if (event.type === 'message') {
-              const visibleText = stripThinkText(event.text || '');
-              if (visibleText.trim()) {
-                ensureAiBubble().textContent = visibleText;
-                activeAiEl.classList.remove('streaming');
-              }
-            } else if (event.type === 'error') {
-              add(event.message || '远程任务失败', 'sys err');
-              done = true;
-            } else if (event.type === 'done') {
-              done = true;
-            }
+            if (handleTurnEvent(event)) done = true;
           }
           done = done || !!payload.done;
           if (!done) await new Promise(resolve => setTimeout(resolve, 650));
@@ -479,6 +605,8 @@ function remotePageHtml() {
     });
     newSessionEl.addEventListener('click', () => createSession().catch(err => add((err && err.message) || '新建失败', 'sys err')));
     refreshSessionsEl.addEventListener('click', () => loadSessions().catch(err => add((err && err.message) || '刷新失败', 'sys err')));
+    if (toggleHistoryEl) toggleHistoryEl.addEventListener('click', () => setDrawer(!document.body.classList.contains('drawer-open')));
+    if (drawerBackdropEl) drawerBackdropEl.addEventListener('click', () => setDrawer(false));
     boot().catch((err) => {
       stateEl.textContent = '连接失败';
       statusEl.textContent = (err && err.message) || '连接失败';
@@ -504,6 +632,7 @@ class RemoteHost extends EventEmitter {
     this.lastError = '';
     this.inFlight = new Set();
     this.remoteTurns = new Map();
+    this.wsClients = new Map();
     this.engineListeners = null;
   }
 
@@ -554,6 +683,7 @@ class RemoteHost extends EventEmitter {
   async ensureServer() {
     if (this.server) return;
     this.server = http.createServer((req, res) => this.handleRequest(req, res));
+    this.server.on('upgrade', (req, socket) => this.handleUpgrade(req, socket));
     await new Promise((resolve, reject) => {
       this.server.once('error', reject);
       this.server.listen(0, '0.0.0.0', () => {
@@ -568,6 +698,12 @@ class RemoteHost extends EventEmitter {
     const server = this.server;
     this.server = null;
     this.port = 0;
+    for (const clients of this.wsClients.values()) {
+      for (const client of clients) {
+        try { client.end(wsCloseFrame()); } catch (_) {}
+      }
+    }
+    this.wsClients.clear();
     if (!server) return;
     await new Promise((resolve) => server.close(resolve));
   }
@@ -680,11 +816,38 @@ class RemoteHost extends EventEmitter {
     if (!turn) return;
     turn.seq += 1;
     turn.updatedAt = Date.now();
-    turn.events.push({ seq: turn.seq, at: new Date().toISOString(), ...event });
+    const storedEvent = { seq: turn.seq, at: new Date().toISOString(), ...event };
+    turn.events.push(storedEvent);
     if (turn.events.length > MAX_REMOTE_EVENTS) {
       turn.events.splice(0, turn.events.length - MAX_REMOTE_EVENTS);
     }
     if (event.type === 'done' || event.type === 'error') turn.done = true;
+    this.broadcastRemoteEvent(turn, storedEvent);
+  }
+
+  broadcastRemoteEvent(turn, event) {
+    const clients = this.wsClients.get(turn.id);
+    if (!clients || !clients.size || !this.pairing) return;
+    const payload = {
+      t: 'event',
+      turn_id: turn.id,
+      thread_id: turn.threadId,
+      next_seq: turn.seq,
+      event,
+    };
+    const frame = wsTextFrame(JSON.stringify({ ok: true, msg: encryptJson(this.pairing.key, payload) }));
+    for (const client of [...clients]) {
+      try {
+        client.write(frame);
+        if (event.type === 'done' || event.type === 'error') {
+          setTimeout(() => {
+            try { client.end(wsCloseFrame()); } catch (_) {}
+          }, 80);
+        }
+      } catch (_) {
+        clients.delete(client);
+      }
+    }
   }
 
   captureRemoteEngineEvent(type, payload = {}) {
@@ -742,6 +905,13 @@ class RemoteHost extends EventEmitter {
     const staleCutoff = Date.now() - REMOTE_TURN_TTL_MS * 2;
     for (const [id, turn] of this.remoteTurns.entries()) {
       if ((turn.done && turn.updatedAt < doneCutoff) || turn.createdAt < staleCutoff) {
+        const clients = this.wsClients.get(id);
+        if (clients) {
+          for (const client of clients) {
+            try { client.end(wsCloseFrame()); } catch (_) {}
+          }
+          this.wsClients.delete(id);
+        }
         this.remoteTurns.delete(id);
       }
     }
@@ -804,6 +974,68 @@ class RemoteHost extends EventEmitter {
       return notFound(res);
     } catch (e) {
       json(res, 400, { ok: false, error: (e && e.message) || '远程请求失败' });
+    }
+  }
+
+  handleUpgrade(req, socket) {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+      if (url.pathname !== '/api/remote/direct/ws') {
+        socket.destroy();
+        return;
+      }
+      const code = url.searchParams.get('code') || '';
+      const turnId = url.searchParams.get('turn_id') || url.searchParams.get('turnId') || '';
+      const pairing = this.currentPairing(code);
+      this.pruneRemoteTurns();
+      const turn = this.remoteTurns.get(turnId);
+      if (!turn) {
+        socket.destroy();
+        return;
+      }
+      const key = req.headers['sec-websocket-key'];
+      if (!key) {
+        socket.destroy();
+        return;
+      }
+      socket.write([
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Accept: ${wsAcceptKey(key)}`,
+        '',
+        '',
+      ].join('\r\n'));
+      let clients = this.wsClients.get(turnId);
+      if (!clients) {
+        clients = new Set();
+        this.wsClients.set(turnId, clients);
+      }
+      clients.add(socket);
+      const cleanup = () => {
+        clients.delete(socket);
+        if (!clients.size) this.wsClients.delete(turnId);
+      };
+      socket.on('close', cleanup);
+      socket.on('end', cleanup);
+      socket.on('error', cleanup);
+      for (const event of turn.events) {
+        const payload = {
+          t: 'event',
+          turn_id: turn.id,
+          thread_id: turn.threadId,
+          next_seq: turn.seq,
+          event,
+        };
+        socket.write(wsTextFrame(JSON.stringify({ ok: true, msg: encryptJson(pairing.key, payload) })));
+      }
+      if (turn.done) {
+        setTimeout(() => {
+          try { socket.end(wsCloseFrame()); } catch (_) {}
+        }, 100);
+      }
+    } catch (_) {
+      try { socket.destroy(); } catch (_) {}
     }
   }
 

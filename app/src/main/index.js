@@ -12,10 +12,32 @@ const { createWorkspaceCheckpoint, rollbackWorkspace } = require('./workspace');
 
 loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 
+const DEFAULT_CLOUD_BACKEND_URLS = [
+  'https://admin-deskagent.debinxiang.top',
+  'https://admin-deskagent.agentsworkforyou.cn',
+  'https://compinfo.debinxiang.top/deskagent',
+];
+const DEFAULT_CLOUD_BACKEND_URL = DEFAULT_CLOUD_BACKEND_URLS[0];
+
 // The metering/auth backend (deskagent-server). The desktop never holds the real
 // upstream key: it authenticates the member's JWT here and the backend forwards
 // to the real relay while metering token usage.
-const BACKEND_URL = (process.env.DESKAGENT_BACKEND_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
+const defaultBackendUrl = app.isPackaged ? DEFAULT_CLOUD_BACKEND_URL : 'http://127.0.0.1:8787';
+function backendUrlCandidates() {
+  const raw = process.env.DESKAGENT_BACKEND_URLS
+    || process.env.DESKAGENT_BACKEND_URL
+    || (app.isPackaged ? DEFAULT_CLOUD_BACKEND_URLS.join(',') : defaultBackendUrl);
+  const urls = String(raw)
+    .split(/[,\s]+/)
+    .map((value) => value.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+  return [...new Set(urls.length ? urls : [defaultBackendUrl])];
+}
+const BACKEND_URLS = backendUrlCandidates();
+let activeBackendUrl = BACKEND_URLS[0];
+function backendUrl() {
+  return activeBackendUrl || BACKEND_URLS[0];
+}
 
 const DEFAULT_SETTINGS = {
   // Production default points at the team relay (OpenAI-compatible gateway).
@@ -98,7 +120,12 @@ function isLoggedIn() {
 function effectiveSettings() {
   const base = getSettings();
   if (isLoggedIn() && !directRelayFallbackActive) {
-    return { ...base, baseUrl: `${BACKEND_URL}/v1`, apiKey: auth.token, relayMode: base.relayMode || 'openai' };
+    return {
+      ...base,
+      baseUrl: `${backendUrl()}/v1`,
+      apiKey: auth.token,
+      relayMode: process.env.DESKAGENT_BACKEND_RELAY_MODE || 'chat',
+    };
   }
   return base;
 }
@@ -117,11 +144,11 @@ function hasDirectRelaySettings() {
   return !!String(s.baseUrl || '').trim() && !!String(s.apiKey || '').trim() && s.apiKey !== '••••••••';
 }
 
-async function backendAvailable(timeoutMs = 1200) {
+async function backendAvailable(timeoutMs = 1200, baseUrl = backendUrl()) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${BACKEND_URL}/health`, { signal: controller.signal });
+    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
     return res.ok;
   } catch (_) {
     return false;
@@ -151,7 +178,8 @@ async function waitForBackendReady(timeoutMs = 8_000) {
 }
 
 async function ensureLocalBackend() {
-  if (!isLocalBackendUrl(BACKEND_URL)) return false;
+  const localUrl = backendUrl();
+  if (!isLocalBackendUrl(localUrl)) return false;
   if (await backendAvailable()) return true;
   if (backendStartPromise) return backendStartPromise;
   backendStartPromise = (async () => {
@@ -161,7 +189,7 @@ async function ensureLocalBackend() {
     fs.mkdirSync(dataDir, { recursive: true });
     const env = {
       ...process.env,
-      BIND_ADDR: new URL(BACKEND_URL).host,
+      BIND_ADDR: new URL(localUrl).host,
       DATABASE_URL: process.env.DATABASE_URL || `sqlite://${path.join(dataDir, 'deskagent.db')}?mode=rwc`,
     };
     backendProc = spawn(bin, [], {
@@ -189,6 +217,8 @@ async function ensureLocalBackend() {
 async function prepareEngineSettings() {
   directRelayFallbackActive = false;
   if (!isLoggedIn()) return;
+  await resolveBackendUrl();
+  await refreshMemberModelSetting();
   if (await ensureLocalBackend()) return;
 
   // Development/internal-test safety net: when the configured member backend is
@@ -196,7 +226,7 @@ async function prepareEngineSettings() {
   // instead of surfacing an opaque adapter 502. Remote/production backends still
   // fail closed so membership metering is not bypassed accidentally.
   if (
-    isLocalBackendUrl(BACKEND_URL) &&
+    isLocalBackendUrl(backendUrl()) &&
     hasDirectRelaySettings() &&
     process.env.DESKAGENT_DIRECT_RELAY_FALLBACK !== 'false'
   ) {
@@ -208,33 +238,54 @@ async function prepareEngineSettings() {
     return;
   }
 
-  throw new Error(`会员服务未连接：${BACKEND_URL}。请先启动 deskagent-server 或配置 DESKAGENT_BACKEND_URL。`);
+  throw new Error(`会员服务未连接：${backendUrl()}。请先启动 deskagent-server 或配置 DESKAGENT_BACKEND_URL。`);
+}
+
+async function resolveBackendUrl(timeoutMs = 1200) {
+  if (isLocalBackendUrl(backendUrl())) return backendUrl();
+  if (await backendAvailable(timeoutMs, backendUrl())) return backendUrl();
+  for (const candidate of BACKEND_URLS) {
+    if (candidate === backendUrl() || isLocalBackendUrl(candidate)) continue;
+    if (await backendAvailable(timeoutMs, candidate)) {
+      activeBackendUrl = candidate;
+      return activeBackendUrl;
+    }
+  }
+  return backendUrl();
 }
 
 async function backendFetch(p, { method = 'GET', body, withAuth = false } = {}) {
-  await ensureLocalBackend();
   const headers = { 'Content-Type': 'application/json' };
   if (withAuth && auth.token) headers['Authorization'] = `Bearer ${auth.token}`;
-  let res;
-  try {
-    res = await fetch(`${BACKEND_URL}${p}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  } catch (e) {
-    const err = new Error(`会员服务未连接：${BACKEND_URL}。请确认 deskagent-server 已启动或配置 DESKAGENT_BACKEND_URL。`);
-    err.cause = e;
-    throw err;
+  const ordered = [await resolveBackendUrl(), ...BACKEND_URLS.filter((url) => url !== backendUrl())];
+  let lastError = null;
+  for (const candidate of ordered) {
+    activeBackendUrl = candidate;
+    await ensureLocalBackend();
+    let res;
+    try {
+      res = await fetch(`${candidate}${p}`, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (e) {
+      lastError = e;
+      if (!isLocalBackendUrl(candidate)) continue;
+      break;
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = (data && data.error && data.error.message) || `请求失败 (${res.status})`;
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = (data && data.error && data.error.message) || `请求失败 (${res.status})`;
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
-  return data;
+  const err = new Error(`会员服务未连接：${BACKEND_URLS.join(', ')}。请确认 deskagent-server 已启动或配置 DESKAGENT_BACKEND_URL。`);
+  err.cause = lastError;
+  throw err;
 }
 
 function canSendToWindow() {
@@ -308,6 +359,38 @@ let settingsCache = null;
 function getSettings() {
   if (!settingsCache) settingsCache = loadSettings();
   return settingsCache;
+}
+
+async function cloudDefaultModel() {
+  try {
+    const catalog = await backendFetch('/api/models');
+    return catalog.default_model || (catalog.models && catalog.models[0] && catalog.models[0].id) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function preferredMemberModel() {
+  if (!isLoggedIn()) return '';
+  try {
+    const me = await backendFetch('/api/me', { withAuth: true });
+    const entitlements = Array.isArray(me.entitlements) ? me.entitlements : [];
+    const entitlement = entitlements.find((item) => Number(item.tokens_remaining || 0) > 0 && item.model);
+    if (entitlement) return entitlement.model;
+  } catch (_) {}
+  return cloudDefaultModel();
+}
+
+async function refreshMemberModelSetting() {
+  const model = await preferredMemberModel();
+  if (!model) return getSettings();
+  const current = getSettings();
+  if (current.model === model) return current;
+  const next = { ...current, model };
+  settingsCache = next;
+  saveSettings(next);
+  sendToWindow('settings:updated', { ...next, apiKey: next.apiKey ? '••••••••' : '' });
+  return next;
 }
 
 // Copy bundled agent configuration into the dedicated runtime home.

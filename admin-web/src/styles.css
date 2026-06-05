@@ -35,6 +35,23 @@ input, select {
   padding: 8px 10px;
   font-size: 14px;
 }
+.muted { color: var(--muted); }
+.entitlements {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 140px;
+}
+.entitlements div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+}
+.entitlements strong {
+  color: var(--text);
+  font-weight: 650;
+}
 textarea {
   width: 100%;
   min-height: 74px;

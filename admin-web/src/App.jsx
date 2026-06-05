@@ -48,6 +48,54 @@ function Stat({ label, value }) {
   );
 }
 
+function useAdminModels() {
+  const [models, setModels] = useState([]);
+  const [defaultModel, setDefaultModel] = useState('');
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    api('/admin/api/models')
+      .then((r) => {
+        setModels(Array.isArray(r.models) ? r.models : []);
+        setDefaultModel(r.default_model || (r.models && r.models[0] && r.models[0].id) || '');
+      })
+      .catch((e) => setErr(e.message));
+  }, []);
+  return { models, defaultModel, err };
+}
+
+function modelName(model) {
+  return model?.display_name || model?.name || model?.id || '';
+}
+
+function ModelSelect({ models, value, onChange, disabled }) {
+  const fallbackId = value || (models[0] && models[0].id) || 'glm-5.1';
+  const options = models.length ? models : [{ id: fallbackId, display_name: fallbackId, configured: true }];
+  return (
+    <select value={value || fallbackId} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
+      {options.map((model) => (
+        <option key={model.id} value={model.id} disabled={model.configured === false}>
+          {modelName(model)}{model.configured === false ? '（未配置密钥）' : ''}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function EntitlementSummary({ user }) {
+  const items = (user.entitlements || []).filter((item) => Number(item.points_remaining || 0) > 0);
+  if (!items.length) return <span className="muted">-</span>;
+  return (
+    <div className="entitlements">
+      {items.map((item) => (
+        <div key={item.model}>
+          <span>{item.model}</span>
+          <strong>{Number(item.points_remaining || 0).toLocaleString()}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Dashboard() {
   const [s, setS] = useState(null);
   const [err, setErr] = useState('');
@@ -73,12 +121,16 @@ function Users() {
   const [err, setErr] = useState('');
   const [phone, setPhone] = useState('');
   const [points, setPoints] = useState('1000000');
-  const [model, setModel] = useState('glm-5.1');
+  const [model, setModel] = useState('');
   const [durationDays, setDurationDays] = useState('30');
   const [created, setCreated] = useState(null);
   const [creating, setCreating] = useState(false);
+  const { models, defaultModel, err: modelsErr } = useAdminModels();
   const load = () => api('/admin/api/users').then((r) => setList(r.users)).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!model && defaultModel) setModel(defaultModel);
+  }, [model, defaultModel]);
   const createTestUser = async () => {
     setErr('');
     setCreated(null);
@@ -91,7 +143,7 @@ function Users() {
       if (!Number.isSafeInteger(days) || days <= 0) throw new Error('有效天数必须是正整数');
       body.points = quota;
       if (quota > 0) {
-        body.model = model.trim() || 'glm-5.1';
+        body.model = model || defaultModel || (models[0] && models[0].id) || 'glm-5.1';
         body.duration_days = days;
       }
       const r = await api('/admin/api/test-users', { method: 'POST', body });
@@ -119,7 +171,7 @@ function Users() {
           </div>
           <div className="field small-field">
             <label>模型</label>
-            <input value={model} onChange={(e) => setModel(e.target.value)} />
+            <ModelSelect models={models} value={model || defaultModel} onChange={setModel} disabled={creating} />
           </div>
           <div className="field tiny-field">
             <label>有效天数</label>
@@ -127,6 +179,7 @@ function Users() {
           </div>
           <button onClick={createTestUser} disabled={creating}>{creating ? '创建中…' : '+ 添加测试用户'}</button>
         </div>
+        {modelsErr && <div className="err">模型列表加载失败：{modelsErr}</div>}
         {created && (
           <div className="notice">
             <div>已创建/刷新测试用户：{created.user.phone}，免费额度 {created.user.free_turns_remaining}/{created.user.free_turns_total} 次</div>
@@ -140,7 +193,7 @@ function Users() {
       <table>
         <thead>
           <tr>
-            <th>ID</th><th>手机号</th><th>免费额度</th><th>会员积分</th><th>对话轮次</th><th>消耗Token</th><th>充值(元)</th><th>注册时间</th><th>最近登录</th>
+            <th>ID</th><th>手机号</th><th>免费额度</th><th>会员积分</th><th>可用模型额度</th><th>对话轮次</th><th>消耗Token</th><th>充值(元)</th><th>注册时间</th><th>最近登录</th>
           </tr>
         </thead>
         <tbody>
@@ -148,6 +201,7 @@ function Users() {
             <tr key={u.id}>
               <td>{u.id}</td><td>{u.phone}</td><td>{u.free_turns_remaining}/{u.free_turns_total}</td>
               <td>{Number(u.points_remaining || 0).toLocaleString()}</td>
+              <td><EntitlementSummary user={u} /></td>
               <td>{u.turns}</td><td>{u.tokens}</td><td>{u.spent_yuan}</td>
               <td>{u.created_at}</td><td>{u.last_login_at || '-'}</td>
             </tr>
@@ -195,16 +249,19 @@ const EMPTY_PKG = {
   sort_order: 0,
 };
 
-function PackageModal({ initial, onClose, onSaved }) {
+function PackageModal({ initial, models, defaultModel, onClose, onSaved }) {
   const [p, setP] = useState(initial);
   const [err, setErr] = useState('');
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!p.model && defaultModel) setP((prev) => ({ ...prev, model: defaultModel }));
+  }, [p.model, defaultModel]);
   const set = (k, v) => setP({ ...p, [k]: v });
   const save = async () => {
     setErr(''); setSaving(true);
     try {
       const body = {
-        name: p.name, model: p.model,
+        name: p.name, model: p.model || defaultModel || (models[0] && models[0].id) || 'glm-5.1',
         total_tokens: Number(p.total_tokens),
         token_multiplier: Number(p.token_multiplier || 1),
         price_cents: Number(p.price_cents),
@@ -220,7 +277,7 @@ function PackageModal({ initial, onClose, onSaved }) {
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>{p.id ? '编辑套餐' : '新建套餐'}</h2>
         <div className="field"><label>名称</label><input value={p.name} onChange={(e) => set('name', e.target.value)} /></div>
-        <div className="field"><label>模型</label><input value={p.model} onChange={(e) => set('model', e.target.value)} /></div>
+        <div className="field"><label>模型</label><ModelSelect models={models} value={p.model || defaultModel} onChange={(value) => set('model', value)} /></div>
         <div className="field"><label>积分数</label><input type="number" min="1" value={p.total_tokens} onChange={(e) => set('total_tokens', e.target.value)} /></div>
         <div className="field"><label>计费倍率</label><input type="number" min="0.01" step="0.01" value={p.token_multiplier ?? 1} onChange={(e) => set('token_multiplier', e.target.value)} /></div>
         <div className="field"><label>价格(分)</label><input type="number" value={p.price_cents} onChange={(e) => set('price_cents', e.target.value)} /></div>
@@ -243,13 +300,15 @@ function Packages() {
   const [list, setList] = useState([]);
   const [err, setErr] = useState('');
   const [editing, setEditing] = useState(null);
+  const { models, defaultModel, err: modelsErr } = useAdminModels();
   const load = () => api('/admin/api/packages').then((r) => setList(r.packages)).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, []);
   return (
     <div>
       <div className="row" style={{ marginBottom: 12 }}>
-        <button onClick={() => setEditing({ ...EMPTY_PKG })}>+ 新建套餐</button>
+        <button onClick={() => setEditing({ ...EMPTY_PKG, model: defaultModel || EMPTY_PKG.model })}>+ 新建套餐</button>
       </div>
+      {modelsErr && <div className="err">模型列表加载失败：{modelsErr}</div>}
       {err && <div className="err">{err}</div>}
       <table>
         <thead><tr><th>ID</th><th>名称</th><th>模型</th><th>积分数</th><th>倍率</th><th>价格(元)</th><th>天数</th><th>状态</th><th></th></tr></thead>
@@ -265,7 +324,7 @@ function Packages() {
           ))}
         </tbody>
       </table>
-      {editing && <PackageModal initial={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
+      {editing && <PackageModal initial={editing} models={models} defaultModel={defaultModel} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
     </div>
   );
 }

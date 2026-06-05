@@ -1,10 +1,12 @@
 use axum::body::Body;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
 use futures::StreamExt;
+use serde_json::json;
 
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
@@ -15,6 +17,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/responses", post(responses))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/chat/completions/ws", axum::routing::get(chat_ws))
 }
 
 fn extract_model(body: &serde_json::Value, default_model: &str) -> String {
@@ -95,6 +98,17 @@ async fn forward_metered(
     let json_body: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| AppError::bad("请求体不是合法 JSON"))?;
     let model = extract_model(&json_body, &st.cfg.default_model);
+    let model_cfg = st
+        .cfg
+        .model(&model)
+        .ok_or_else(|| AppError::bad(format!("模型未开放或不存在: {model}")))?;
+    if model_cfg.api_key.trim().is_empty() {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "model_not_configured",
+            format!("模型服务未配置密钥: {}", model_cfg.display_name),
+        ));
+    }
     let wants_stream = json_body
         .get("stream")
         .and_then(|s| s.as_bool())
@@ -111,11 +125,11 @@ async fn forward_metered(
     .await?;
 
     // Forward to the real relay with the server-side key.
-    let url = upstream_endpoint(&st.cfg.upstream_base_url, endpoint);
+    let url = upstream_endpoint(&model_cfg.base_url, endpoint);
     let mut req = st
         .http
         .post(&url)
-        .bearer_auth(&st.cfg.upstream_api_key)
+        .bearer_auth(&model_cfg.api_key)
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(accept) = headers.get(header::ACCEPT) {
         req = req.header(header::ACCEPT, accept);
@@ -245,4 +259,186 @@ async fn chat_completions(
     body: axum::body::Bytes,
 ) -> AppResult<Response> {
     forward_metered(st, user, headers, body, "chat/completions").await
+}
+
+async fn chat_ws(
+    ws: WebSocketUpgrade,
+    State(st): State<AppState>,
+    user: AuthUser,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(move |socket| handle_chat_ws(socket, st, user))
+}
+
+async fn handle_chat_ws(mut socket: WebSocket, st: AppState, user: AuthUser) {
+    let Some(first) = socket.recv().await else {
+        return;
+    };
+    let body_text = match first {
+        Ok(Message::Text(text)) => text.to_string(),
+        Ok(Message::Binary(bytes)) => match String::from_utf8(bytes.to_vec()) {
+            Ok(text) => text,
+            Err(_) => {
+                let _ = socket
+                    .send(Message::Text(
+                        json!({"type":"error","error":{"message":"请求体不是合法 JSON"}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+                return;
+            }
+        },
+        _ => return,
+    };
+    let body_bytes = body_text.as_bytes();
+    if body_bytes.len() > st.cfg.max_body_bytes {
+        let _ = socket
+            .send(Message::Text(
+                json!({"type":"error","error":{"message":"请求体过大"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
+    let json_body: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = socket
+                .send(Message::Text(
+                    json!({"type":"error","error":{"message":"请求体不是合法 JSON"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let model = extract_model(&json_body, &st.cfg.default_model);
+    let model_cfg = match st.cfg.model(&model) {
+        Some(cfg) => cfg,
+        None => {
+            let _ = socket
+                .send(Message::Text(
+                    json!({"type":"error","error":{"message": format!("模型未开放或不存在: {model}")}})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    if model_cfg.api_key.trim().is_empty() {
+        let _ = socket
+            .send(Message::Text(
+                json!({"type":"error","error":{"message": format!("模型服务未配置密钥: {}", model_cfg.display_name)}})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
+    let reservation = match meter::reserve(
+        &st.db,
+        user.0.sub,
+        &model,
+        st.cfg.reserve_tokens,
+        st.cfg.free_turns,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(
+                    json!({"type":"error","error":{"message": e.message}})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    let url = upstream_endpoint(&model_cfg.base_url, "chat/completions");
+    let upstream = match st
+        .http
+        .post(&url)
+        .bearer_auth(&model_cfg.api_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(body_text.to_string())
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            meter::fail_reservation(&st.db, &reservation).await;
+            let _ = socket
+                .send(Message::Text(
+                    json!({"type":"error","error":{"message": format!("无法连接模型服务: {e}")}})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    let status = upstream.status();
+    if !status.is_success() {
+        let txt = upstream.text().await.unwrap_or_default();
+        meter::fail_reservation(&st.db, &reservation).await;
+        let _ = socket
+            .send(Message::Text(
+                json!({"type":"error","status": status.as_u16(), "error":{"message": txt}})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
+
+    let mut acc = String::new();
+    let mut upstream_stream = upstream.bytes_stream();
+    let mut errored = false;
+    while let Some(chunk) = upstream_stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                if let Ok(s) = std::str::from_utf8(&bytes) {
+                    acc.push_str(s);
+                    if acc.len() > 512 * 1024 {
+                        let mut cut = acc.len() - 256 * 1024;
+                        while cut < acc.len() && !acc.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        acc.drain(0..cut);
+                    }
+                    if socket
+                        .send(Message::Text(s.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        errored = true;
+                        break;
+                    }
+                } else if socket.send(Message::Binary(bytes)).await.is_err() {
+                    errored = true;
+                    break;
+                }
+            }
+            Err(_) => {
+                errored = true;
+                break;
+            }
+        }
+    }
+    let usage = scan_sse_usage(&acc);
+    match (errored, usage) {
+        (false, Some((p, c, t))) => meter::reconcile(&st.db, &reservation, p, c, Some(t)).await,
+        _ => meter::reconcile(&st.db, &reservation, 0, 0, None).await,
+    }
+    let _ = socket
+        .send(Message::Text(json!({"type":"done"}).to_string().into()))
+        .await;
 }

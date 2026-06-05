@@ -14,6 +14,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin/api/login", post(login))
         .route("/admin/api/stats", get(stats))
+        .route("/admin/api/models", get(list_models))
         .route("/admin/api/users", get(list_users))
         .route("/admin/api/test-users", post(create_test_user))
         .route("/admin/api/orders", get(list_orders))
@@ -82,6 +83,16 @@ async fn stats(State(st): State<AppState>, _a: AuthAdmin) -> AppResult<Json<serd
     })))
 }
 
+async fn list_models(
+    State(st): State<AppState>,
+    _a: AuthAdmin,
+) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(json!({
+        "models": st.cfg.public_models(),
+        "default_model": st.cfg.default_model,
+    })))
+}
+
 async fn list_users(
     State(st): State<AppState>,
     _a: AuthAdmin,
@@ -111,6 +122,29 @@ async fn list_users(
         .bind(id)
         .fetch_one(&st.db)
         .await?;
+        let entitlement_rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT model, COALESCE(SUM(token_allowance - tokens_used),0) FROM entitlements
+             WHERE user_id = ? AND status='active' AND expires_at > datetime('now')
+             GROUP BY model ORDER BY model",
+        )
+        .bind(id)
+        .fetch_all(&st.db)
+        .await?;
+        let entitlements: Vec<serde_json::Value> = entitlement_rows
+            .into_iter()
+            .map(|(model, remaining)| {
+                json!({
+                    "model": model,
+                    "points_remaining": remaining.max(0),
+                    "tokens_remaining": remaining.max(0),
+                })
+            })
+            .collect();
+        let models = entitlements
+            .iter()
+            .filter_map(|item| item.get("model").and_then(|m| m.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
         let spent: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE user_id = ? AND status='granted'",
         )
@@ -124,6 +158,8 @@ async fn list_users(
             "free_turns_remaining": (st.cfg.free_turns - free_used).max(0),
             "points_remaining": points_remaining.max(0),
             "tokens_remaining": points_remaining.max(0),
+            "entitlements": entitlements,
+            "models": models,
             "turns": turns, "tokens": tokens,
             "spent_cents": spent,
             "spent_yuan": format!("{:.2}", spent as f64 / 100.0),
@@ -162,7 +198,9 @@ async fn create_test_user(
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| {
-            let suffix = chrono::Utc::now().timestamp_millis().rem_euclid(100_000_000);
+            let suffix = chrono::Utc::now()
+                .timestamp_millis()
+                .rem_euclid(100_000_000);
             format!("199{suffix:08}")
         });
     if !valid_phone(&phone) {
@@ -182,13 +220,24 @@ async fn create_test_user(
     if !req.token_multiplier.is_finite() || req.token_multiplier <= 0.0 {
         return Err(AppError::bad("计费倍率必须大于 0"));
     }
-    let model = req
+    let requested_model = req
         .model
         .as_deref()
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .unwrap_or(st.cfg.default_model.as_str())
         .to_string();
+    let model_cfg = st
+        .cfg
+        .model(&requested_model)
+        .ok_or_else(|| AppError::bad(format!("模型未开放或不存在: {requested_model}")))?;
+    if allowance > 0 && model_cfg.api_key.trim().is_empty() {
+        return Err(AppError::bad(format!(
+            "模型 {} 未配置云端密钥，不能发放额度",
+            model_cfg.display_name
+        )));
+    }
+    let model = model_cfg.id;
 
     let mut tx = st.db.begin().await?;
     let (id, free_used): (i64, i64) = sqlx::query_as(
@@ -248,7 +297,10 @@ async fn create_test_user(
         &format!(
             "user #{id} {phone}{}",
             if allowance > 0 {
-                format!(" +{allowance} points {model} x{}/{}d", req.token_multiplier, duration_days)
+                format!(
+                    " +{allowance} points {model} x{}/{}d",
+                    req.token_multiplier, duration_days
+                )
             } else {
                 String::new()
             }
@@ -341,12 +393,23 @@ fn default_multiplier() -> f64 {
     1.0
 }
 
-fn validate_package(req: &PackageReq) -> AppResult<()> {
+fn validate_package(st: &AppState, req: &PackageReq) -> AppResult<()> {
     if req.name.trim().is_empty() {
         return Err(AppError::bad("套餐名称不能为空"));
     }
-    if req.model.trim().is_empty() {
+    let model = req.model.trim();
+    if model.is_empty() {
         return Err(AppError::bad("模型不能为空"));
+    }
+    let model_cfg = st
+        .cfg
+        .model(model)
+        .ok_or_else(|| AppError::bad(format!("模型未开放或不存在: {model}")))?;
+    if model_cfg.api_key.trim().is_empty() {
+        return Err(AppError::bad(format!(
+            "模型 {} 未配置云端密钥，不能创建套餐",
+            model_cfg.display_name
+        )));
     }
     if req.total_tokens <= 0 {
         return Err(AppError::bad("套餐积分数必须大于 0"));
@@ -368,7 +431,7 @@ async fn create_package(
     a: AuthAdmin,
     Json(req): Json<PackageReq>,
 ) -> AppResult<Json<serde_json::Value>> {
-    validate_package(&req)?;
+    validate_package(&st, &req)?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO packages (name, model, total_tokens, token_multiplier, price_cents, duration_days, active, sort_order)
          VALUES (?,?,?,?,?,?,?,?) RETURNING id",
@@ -402,7 +465,7 @@ async fn update_package(
     Path(id): Path<i64>,
     Json(req): Json<PackageReq>,
 ) -> AppResult<Json<serde_json::Value>> {
-    validate_package(&req)?;
+    validate_package(&st, &req)?;
     let res = sqlx::query(
         "UPDATE packages SET name=?, model=?, total_tokens=?, token_multiplier=?, price_cents=?, duration_days=?, active=?, sort_order=? WHERE id=?",
     )
