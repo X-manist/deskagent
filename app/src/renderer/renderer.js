@@ -898,29 +898,34 @@ const EN_PACKAGE_NAMES = new Map([
   ['体验套餐', 'Trial Plan'],
 ]);
 
-function currentLocale() {
-  let stored = '';
+function localeCandidates() {
+  const values = [];
   try {
-    stored = (window.localStorage && (
-      window.localStorage.getItem('deskagent.locale')
-      || window.localStorage.getItem('deskagent.language')
-      || window.localStorage.getItem('locale')
-      || window.localStorage.getItem('language')
-    )) || '';
+    if (window.localStorage) {
+      values.push(window.localStorage.getItem('deskagent.locale'));
+      values.push(window.localStorage.getItem('deskagent.language'));
+    }
   } catch (_) {}
   const docEl = document.documentElement || {};
   const bodyEl = document.body || {};
-  const lang = stored
-    || (docEl.dataset && (docEl.dataset.locale || docEl.dataset.lang))
-    || (bodyEl.dataset && (bodyEl.dataset.locale || bodyEl.dataset.lang))
-    || docEl.lang
-    || (typeof navigator !== 'undefined' && navigator.language)
-    || '';
-  return String(lang || '').toLowerCase();
+  if (docEl.dataset) {
+    values.push(docEl.dataset.locale);
+    values.push(docEl.dataset.lang);
+  }
+  if (bodyEl.dataset) {
+    values.push(bodyEl.dataset.locale);
+    values.push(bodyEl.dataset.lang);
+  }
+  values.push(docEl.lang);
+  return values
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function isEnglishUi() {
-  return currentLocale().startsWith('en');
+  const locales = localeCandidates();
+  if (locales.some((locale) => locale.startsWith('zh'))) return false;
+  return locales.some((locale) => locale.startsWith('en'));
 }
 
 function t(zh, en) {

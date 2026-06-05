@@ -9,16 +9,25 @@ function read(rel) {
   return fs.readFileSync(path.join(root, rel), 'utf8');
 }
 
-function accountI18nFor(lang) {
+function accountI18nFor(lang, options = {}) {
   const source = read('app/src/renderer/renderer.js');
   const start = source.indexOf('const EN_PACKAGE_NAMES');
   const end = source.indexOf('\nfunction setLoggedIn', start);
   assert(start > 0 && end > start, 'account i18n helper block is present');
 
+  const store = options.store || {};
   const context = {
-    document: { documentElement: { lang } },
-    navigator: { language: lang },
-    window: {},
+    document: {
+      documentElement: { lang, dataset: options.documentDataset || {} },
+      body: { dataset: options.bodyDataset || {} },
+    },
+    window: {
+      localStorage: {
+        getItem(key) {
+          return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+        },
+      },
+    },
   };
   vm.runInNewContext(source.slice(start, end), context);
   return context.window.__deskagentAccountI18n;
@@ -32,6 +41,14 @@ assert.strictEqual(en.packageDisplayName({ id: 3, name: 'Team Plan' }), 'Team Pl
 
 const zh = accountI18nFor('zh-CN');
 assert.strictEqual(zh.packageDisplayName({ id: 1, name: '月度会员' }), '月度会员');
+
+const zhPageWithEnglishPreference = accountI18nFor('zh-CN', {
+  store: { 'deskagent.locale': 'en-US' },
+});
+assert.strictEqual(
+  zhPageWithEnglishPreference.packageDisplayName({ id: 1, name: '月度会员' }),
+  '月度会员',
+);
 
 const adminApp = read('admin-web/src/App.jsx');
 assert(adminApp.includes('body.points = quota'), 'admin test-user form sends points');
