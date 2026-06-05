@@ -105,8 +105,8 @@ jobs:
             "native/os-tools/target/release/deskagent-os-tools"
             "server/target/release/deskagent-server"
             "app/resources/codex-package.json"
-            "app/resources/codex-resources/codex-command-runner"
-            "app/resources/codex-path/rg"
+            "app/resources/codex-resources"
+            "app/resources/codex-path"
           )
           for file in "${required[@]}"; do
             test -e "$file" || { echo "Missing macOS build input: $file" >&2; exit 1; }
