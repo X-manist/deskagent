@@ -53,9 +53,10 @@ assert.strictEqual(
 const adminApp = read('admin-web/src/App.jsx');
 assert(adminApp.includes('body.points = quota'), 'admin test-user form sends points');
 assert(adminApp.includes('body.duration_days = days'), 'admin test-user form sends duration_days');
-assert(adminApp.includes('body.model = model.trim()'), 'admin test-user form sends model');
+assert(adminApp.includes('body.models = selectedModels.length'), 'admin test-user form sends selected models');
 assert(adminApp.includes('created.entitlement'), 'admin UI displays created entitlement');
-assert(adminApp.includes('会员积分'), 'admin users table shows membership points');
+assert(adminApp.includes('积分余额'), 'admin users table shows membership points');
+assert(adminApp.includes('可用模型额度'), 'admin users table shows entitlement models');
 
 const adminRoutes = read('server/src/routes/admin.rs');
 assert(adminRoutes.includes('points: Option<i64>'), 'admin API accepts points');

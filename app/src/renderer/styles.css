@@ -1040,10 +1040,20 @@ button {
   border-left-color: var(--accent);
 }
 
-.activity.reasoning {
+.activity.reasoning,
+.activity.tool,
+.activity.command {
   border-left-color: var(--gold);
   max-width: min(720px, 88%);
   font-family: inherit;
+}
+
+.activity.tool {
+  border-left-color: var(--accent);
+}
+
+.activity.command {
+  border-left-color: var(--warn);
 }
 
 .activity details {
@@ -1059,6 +1069,12 @@ button {
   gap: 8px;
   list-style: none;
   min-height: 24px;
+}
+
+.activity-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .activity summary::-webkit-details-marker {

@@ -98,6 +98,10 @@ function compactJson(value, max = 500) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function hasRuntimeItemId(value) {
+  return value !== undefined && value !== null && String(value) !== '';
+}
+
 function resolveAgentRuntimeBin() {
   if (process.env.CODEX_BIN && fs.existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN;
   // packaged native runtime binary (branded name; never exposes the upstream name)
@@ -140,6 +144,8 @@ class Engine extends EventEmitter {
     this.currentTurnId = null;
     this.deltaItems = new Map(); // `${threadId}:${itemId}` -> accumulated text
     this.itemUiIds = new Map(); // `${threadId}:${sourceItemId}` -> current-turn UI item id
+    this.syntheticItemSeq = new Map(); // `${threadId}:${itemType}` -> counter for missing runtime ids
+    this.syntheticActiveItems = new Map(); // `${threadId}:${itemType}` -> synthetic source id
     // Per-thread turn bookkeeping for concurrent conversations. The engine's
     // global `this.state` only reflects app-server lifecycle (starting/ready/
     // error); whether a given conversation is mid-turn lives here so multiple
@@ -643,6 +649,27 @@ class Engine extends EventEmitter {
         } else if (item.type === 'reasoning') {
           const summaryText = reasoningSummaryText(item.summary);
           if (summaryText) out.push({ kind: 'activity', activityKind: 'reasoning', text: summaryText });
+        } else if (item.type === 'mcpToolCall') {
+          const text = [
+            item.status === 'completed' ? '工具调用完成' : '正在调用工具',
+            `${item.server || 'tool'}.${item.tool || ''}`,
+            item.error ? `结果：${compactJson(item.error)}` : (item.result ? `结果：${compactJson(item.result)}` : ''),
+          ].filter(Boolean).join('\n');
+          out.push({ kind: 'activity', activityKind: 'tool', text });
+        } else if (item.type === 'dynamicToolCall') {
+          const name = [item.namespace, item.tool].filter(Boolean).join('.') || item.tool || 'tool';
+          const output = compactJson(item.contentItems);
+          out.push({
+            kind: 'activity',
+            activityKind: 'tool',
+            text: ['工具调用完成', name, output ? `结果：${output}` : ''].filter(Boolean).join('\n'),
+          });
+        } else if (item.type === 'webSearch') {
+          out.push({
+            kind: 'activity',
+            activityKind: 'tool',
+            text: ['搜索完成', item.query || 'web search'].filter(Boolean).join('\n'),
+          });
         }
       }
     }
@@ -680,6 +707,25 @@ class Engine extends EventEmitter {
     for (const key of this.deltaItems.keys()) {
       if (key.startsWith(prefix)) this.deltaItems.delete(key);
     }
+    for (const key of this.syntheticItemSeq.keys()) {
+      if (key.startsWith(prefix)) this.syntheticItemSeq.delete(key);
+    }
+    for (const key of this.syntheticActiveItems.keys()) {
+      if (key.startsWith(prefix)) this.syntheticActiveItems.delete(key);
+    }
+  }
+
+  _sourceItemId(threadId, itemType, itemId, phase = '') {
+    if (hasRuntimeItemId(itemId)) return itemId;
+    const key = `${threadId}:${itemType || 'item'}`;
+    if (phase === 'started' || !this.syntheticActiveItems.has(key)) {
+      const next = (this.syntheticItemSeq.get(key) || 0) + 1;
+      this.syntheticItemSeq.set(key, next);
+      this.syntheticActiveItems.set(key, `${itemType || 'item'}-${next}`);
+    }
+    const syntheticId = this.syntheticActiveItems.get(key);
+    if (phase === 'completed') this.syntheticActiveItems.delete(key);
+    return syntheticId;
   }
 
   _turnScope(threadId, turnId) {
@@ -729,18 +775,22 @@ class Engine extends EventEmitter {
         break;
       case 'item/agentMessage/delta': {
         const itemId = params.itemId || params.item_id;
-        const uiItemId = this._uiItemId(threadId, itemId);
+        const sourceItemId = this._sourceItemId(threadId, 'agentMessage', itemId, 'delta');
+        const syntheticItemId = !hasRuntimeItemId(itemId);
+        const uiItemId = this._uiItemId(threadId, sourceItemId);
         const key = `${threadId}:${uiItemId}`;
         const prev = this.deltaItems.get(key) || '';
         const next = prev + (params.delta || '');
         this.deltaItems.set(key, next);
-        this.emit('delta', { threadId, itemId: uiItemId, sourceItemId: itemId, delta: params.delta || '', text: next });
+        this.emit('delta', { threadId, itemId: uiItemId, sourceItemId, syntheticItemId, delta: params.delta || '', text: next });
         break;
       }
       case 'item/reasoning/summaryTextDelta':
       case 'item/reasoning/textDelta': {
         const itemId = params.itemId || params.item_id;
-        const uiItemId = this._uiItemId(threadId, itemId || 'reasoning');
+        const sourceItemId = this._sourceItemId(threadId, 'reasoning', itemId, 'delta');
+        const syntheticItemId = !hasRuntimeItemId(itemId);
+        const uiItemId = this._uiItemId(threadId, sourceItemId);
         const key = `${threadId}:${uiItemId}:reasoning`;
         const delta = params.delta || '';
         const prev = this.deltaItems.get(key) || '';
@@ -751,15 +801,18 @@ class Engine extends EventEmitter {
           kind: 'reasoning',
           phase: 'delta',
           itemId: uiItemId,
-          sourceItemId: itemId,
+          sourceItemId,
+          syntheticItemId,
           delta,
           text: next,
         });
         break;
       }
       case 'item/commandExecution/outputDelta': {
-        const itemId = params.itemId || params.item_id || 'command';
-        const uiItemId = this._uiItemId(threadId, itemId);
+        const itemId = params.itemId || params.item_id;
+        const sourceItemId = this._sourceItemId(threadId, 'commandExecution', itemId, 'delta');
+        const syntheticItemId = !hasRuntimeItemId(itemId);
+        const uiItemId = this._uiItemId(threadId, sourceItemId);
         const key = `${threadId}:${uiItemId}:command`;
         const delta = params.delta || '';
         const prev = this.deltaItems.get(key) || '';
@@ -770,7 +823,8 @@ class Engine extends EventEmitter {
           kind: 'command',
           phase: 'delta',
           itemId: uiItemId,
-          sourceItemId: itemId,
+          sourceItemId,
+          syntheticItemId,
           delta,
           output: next,
           text: next,
@@ -778,14 +832,17 @@ class Engine extends EventEmitter {
         break;
       }
       case 'item/mcpToolCall/progress': {
-        const itemId = params.itemId || params.item_id || 'mcp';
-        const uiItemId = this._uiItemId(threadId, itemId);
+        const itemId = params.itemId || params.item_id;
+        const sourceItemId = this._sourceItemId(threadId, 'mcpToolCall', itemId, 'progress');
+        const syntheticItemId = !hasRuntimeItemId(itemId);
+        const uiItemId = this._uiItemId(threadId, sourceItemId);
         this.emit('activity', {
           threadId,
           kind: 'tool',
           phase: 'progress',
           itemId: uiItemId,
-          sourceItemId: itemId,
+          sourceItemId,
+          syntheticItemId,
           text: params.message || '工具执行中…',
         });
         break;
@@ -845,18 +902,30 @@ class Engine extends EventEmitter {
             .map((part) => part.text)
             .join('\n')
         : '');
-    if (t === 'agentMessage' && phase === 'completed') {
-      this.emit('message', { threadId, itemId: this._uiItemId(threadId, item.id), sourceItemId: item.id, text: itemText || '' });
+    if (t === 'agentMessage' && phase === 'started') {
+      this._sourceItemId(threadId, 'agentMessage', item.id, phase);
+    } else if (t === 'agentMessage' && phase === 'completed') {
+      const sourceItemId = this._sourceItemId(threadId, 'agentMessage', item.id, phase);
+      this.emit('message', {
+        threadId,
+        itemId: this._uiItemId(threadId, sourceItemId),
+        sourceItemId,
+        syntheticItemId: !hasRuntimeItemId(item.id),
+        text: itemText || '',
+      });
     } else if (t === 'commandExecution') {
       const command = item.command || '';
       const status = item.status || phase;
       const output = item.aggregatedOutput || '';
+      const sourceItemId = this._sourceItemId(threadId, 'commandExecution', item.id, phase);
+      const syntheticItemId = !hasRuntimeItemId(item.id);
       this.emit('activity', {
         threadId,
         kind: 'command',
         phase,
-        itemId: this._uiItemId(threadId, item.id || 'command'),
-        sourceItemId: item.id,
+        itemId: this._uiItemId(threadId, sourceItemId),
+        sourceItemId,
+        syntheticItemId,
         text: command,
         status,
         output,
@@ -876,24 +945,30 @@ class Engine extends EventEmitter {
       });
     } else if (t === 'reasoning') {
       const text = reasoningSummaryText(item.summary) || itemText;
+      const sourceItemId = this._sourceItemId(threadId, 'reasoning', item.id, phase);
+      const syntheticItemId = !hasRuntimeItemId(item.id);
       this.emit('activity', {
         threadId,
         kind: 'reasoning',
         phase,
-        itemId: this._uiItemId(threadId, item.id || 'reasoning'),
-        sourceItemId: item.id,
+        itemId: this._uiItemId(threadId, sourceItemId),
+        sourceItemId,
+        syntheticItemId,
         text,
       });
     } else if (t === 'mcpToolCall') {
       const status = item.status || phase;
       const text = `${item.server || 'tool'}.${item.tool || ''}`;
       const result = item.error ? compactJson(item.error) : compactJson(item.result);
+      const sourceItemId = this._sourceItemId(threadId, 'mcpToolCall', item.id, phase);
+      const syntheticItemId = !hasRuntimeItemId(item.id);
       this.emit('activity', {
         threadId,
         kind: 'tool',
         phase,
-        itemId: this._uiItemId(threadId, item.id || 'mcp'),
-        sourceItemId: item.id,
+        itemId: this._uiItemId(threadId, sourceItemId),
+        sourceItemId,
+        syntheticItemId,
         text,
         status,
         output: result,
@@ -906,12 +981,15 @@ class Engine extends EventEmitter {
     } else if (t === 'dynamicToolCall') {
       const text = [item.namespace, item.tool].filter(Boolean).join('.') || item.tool || 'tool';
       const output = compactJson(item.contentItems);
+      const sourceItemId = this._sourceItemId(threadId, 'dynamicToolCall', item.id, phase);
+      const syntheticItemId = !hasRuntimeItemId(item.id);
       this.emit('activity', {
         threadId,
         kind: 'tool',
         phase,
-        itemId: this._uiItemId(threadId, item.id || 'dynamic-tool'),
-        sourceItemId: item.id,
+        itemId: this._uiItemId(threadId, sourceItemId),
+        sourceItemId,
+        syntheticItemId,
         text,
         status: item.status || phase,
         output,
@@ -922,12 +1000,15 @@ class Engine extends EventEmitter {
         ].filter(Boolean).join('\n'),
       });
     } else if (t === 'webSearch') {
+      const sourceItemId = this._sourceItemId(threadId, 'webSearch', item.id, phase);
+      const syntheticItemId = !hasRuntimeItemId(item.id);
       this.emit('activity', {
         threadId,
         kind: 'tool',
         phase,
-        itemId: this._uiItemId(threadId, item.id || 'web-search'),
-        sourceItemId: item.id,
+        itemId: this._uiItemId(threadId, sourceItemId),
+        sourceItemId,
+        syntheticItemId,
         text: item.query || 'web search',
         status: phase,
         display: `${phase === 'started' ? '正在搜索' : '搜索完成'}\n${item.query || ''}`,

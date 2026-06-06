@@ -285,17 +285,40 @@ function makeMessageEl(role, text) {
   return { wrap, bubble };
 }
 
+function activitySummary(kind, text) {
+  if (kind === 'reasoning') return '思考中';
+  const firstLine = String(text || '').split('\n').find((line) => line.trim());
+  if (kind === 'tool') return firstLine || '工具调用';
+  if (kind === 'command') return firstLine || '命令执行';
+  return firstLine || '';
+}
+
+function isCollapsedActivity(kind) {
+  return kind === 'reasoning' || kind === 'tool' || kind === 'command';
+}
+
+function updateActivityEl(el, kind, text) {
+  if (!el) return;
+  const body = el._activityBody || el;
+  body.textContent = text || '';
+  if (el._activitySummary) el._activitySummary.textContent = activitySummary(kind, text);
+}
+
 function makeActivityEl(kind, text) {
   const el = document.createElement('div');
   el.className = `activity ${kind === 'file' ? 'file' : kind === 'reasoning' ? 'reasoning' : kind === 'tool' ? 'tool' : kind === 'command' ? 'command' : ''}`;
-  if (kind === 'reasoning') {
+  if (isCollapsedActivity(kind)) {
     const details = document.createElement('details');
     const summary = document.createElement('summary');
     const body = document.createElement('div');
-    summary.textContent = '思考中';
+    const label = document.createElement('span');
+    label.className = 'activity-label';
+    label.textContent = activitySummary(kind, text);
+    summary.appendChild(label);
     body.className = 'activity-body';
     body.textContent = text || '';
     el._activityBody = body;
+    el._activitySummary = label;
     details.appendChild(summary);
     details.appendChild(body);
     el.appendChild(details);
@@ -359,6 +382,59 @@ function activityDisplay(p) {
     return [status, p.text || '', output ? `结果：${output}` : ''].filter(Boolean).join('\n');
   }
   return p.text || '';
+}
+
+function findMessageByItemId(conv, itemId) {
+  if (!conv || !itemId) return null;
+  return [...conv.items].reverse().find((it) => it.kind === 'message' && it.itemId === itemId) || null;
+}
+
+function hasFollowingActivity(conv, item) {
+  if (!conv || !item) return false;
+  const idx = conv.items.indexOf(item);
+  return idx >= 0 && conv.items.slice(idx + 1).some((it) => it.kind === 'activity');
+}
+
+function continuationTextFrom(p, item) {
+  const full = String((p && p.text) || '');
+  const delta = String((p && p.delta) || '');
+  const prefix = item && item.splitPrefix;
+  if (prefix && full.startsWith(prefix)) return full.slice(prefix.length).replace(/^\n+/, '');
+  if (delta && item && item.splitPrefix) return delta.replace(/^\n+/, '');
+  return full;
+}
+
+function updateMessageItem(conv, item, text, streamText, streaming) {
+  if (!item) return;
+  item.text = text;
+  item.streamText = streamText;
+  item.streaming = streaming;
+  if (conv.id !== activeId) return;
+  const bubble = item.itemId && activeBubbles.get(item.itemId);
+  if (bubble) {
+    renderMessageContent(bubble, 'ai', text);
+    scrollToBottom();
+  } else {
+    renderActive();
+  }
+}
+
+function shouldAppendMessageContinuation(conv, item) {
+  return item && item.itemId && hasFollowingActivity(conv, item);
+}
+
+function makeMessageContinuation(p, previousItem, streaming) {
+  const splitPrefix = String((previousItem && (previousItem.streamText || previousItem.text)) || '');
+  const text = String((p && p.delta) || '').replace(/^\n+/, '') || continuationTextFrom(p, { splitPrefix });
+  return {
+    kind: 'message',
+    role: 'ai',
+    text,
+    itemId: p.itemId,
+    streamText: String((p && p.text) || ''),
+    splitPrefix,
+    streaming,
+  };
 }
 
 // Push an item to a conversation buffer; mirror into the DOM if it's active.
@@ -885,39 +961,40 @@ window.api.on('engine:status', (p) => setLifecycle(p.state, p.message));
 window.api.on('chat:delta', (p) => {
   const conv = getConv(p.threadId);
   if (!conv) return;
-  let item = conv.items.find((it) => it.kind === 'message' && it.itemId === p.itemId);
+  if (!String(p.text || p.delta || '').length) return;
+  let item = findMessageByItemId(conv, p.itemId);
+  if (shouldAppendMessageContinuation(conv, item)) {
+    pushItem(conv, makeMessageContinuation(p, item, true));
+    return;
+  }
   if (!item) {
-    item = { kind: 'message', role: 'ai', text: p.text, itemId: p.itemId, streaming: true };
+    item = {
+      kind: 'message',
+      role: 'ai',
+      text: p.text || p.delta || '',
+      itemId: p.itemId,
+      streamText: p.text || p.delta || '',
+      streaming: true,
+    };
     conv.items.push(item);
     if (conv.id === activeId) appendItemDom(item);
   } else {
-    item.text = p.text;
-    if (conv.id === activeId) {
-      const bubble = activeBubbles.get(p.itemId);
-      if (bubble) {
-        renderMessageContent(bubble, 'ai', p.text);
-        scrollToBottom();
-      }
-    }
+    const text = item.splitPrefix ? continuationTextFrom(p, item) : p.text;
+    updateMessageItem(conv, item, text || '', p.text || '', true);
   }
 });
 
 window.api.on('chat:message', (p) => {
   const conv = getConv(p.threadId);
   if (!conv) return;
-  let item = p.itemId && conv.items.find((it) => it.kind === 'message' && it.itemId === p.itemId);
-  if (!item) {
-    // Fall back to the most recent streaming AI bubble without a final text.
-    item = [...conv.items].reverse().find((it) => it.kind === 'message' && it.role === 'ai' && it.streaming);
+  let item = findMessageByItemId(conv, p.itemId);
+  if (shouldAppendMessageContinuation(conv, item)) {
+    pushItem(conv, makeMessageContinuation(p, item, false));
+    return;
   }
   if (item) {
-    item.text = p.text;
-    item.streaming = false;
-    if (conv.id === activeId) {
-      const bubble = item.itemId && activeBubbles.get(item.itemId);
-      if (bubble) renderMessageContent(bubble, 'ai', p.text);
-      else renderActive();
-    }
+    const text = item.splitPrefix ? continuationTextFrom(p, item) : p.text;
+    updateMessageItem(conv, item, text || '', p.text || '', false);
   } else if (p.text) {
     pushItem(conv, { kind: 'message', role: 'ai', text: p.text, itemId: p.itemId });
   }
@@ -945,7 +1022,8 @@ window.api.on('chat:activity', (p) => {
   if (conv.id === activeId) {
     const body = activeActivities.get(fallbackId);
     if (body) {
-      body.textContent = item.display || '';
+      const el = body.closest ? body.closest('.activity') : body;
+      updateActivityEl(el || body, item.activityKind, item.display);
       scrollToBottom();
     } else {
       renderActive();
@@ -996,6 +1074,8 @@ window.api.on('chat:historyLoaded', (p) => {
     if (m.kind === 'message') return { kind: 'message', role: m.role, text: m.text };
     if (m.activityKind === 'file') return { kind: 'activity', activityKind: 'file', display: '已修改文件：' + (m.files || []).join(', ') };
     if (m.activityKind === 'reasoning') return { kind: 'activity', activityKind: 'reasoning', display: m.text || '' };
+    if (m.activityKind === 'command') return { kind: 'activity', activityKind: 'command', display: m.text || '' };
+    if (m.activityKind === 'tool') return { kind: 'activity', activityKind: 'tool', display: m.text || '' };
     return null;
   }).filter(Boolean);
   conv.loaded = true;
