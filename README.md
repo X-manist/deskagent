@@ -41,8 +41,7 @@
 - `app/resources/bin/deskagent-core`：内置 agent runtime（已品牌化二进制，签名标识 `com.zhijie.deskagent.core`，不暴露上游名称）
 - `core/codex/codex-rs/`：agent runtime 源码（编译产物即 `deskagent-core`）
 - `agentconfig/`：预置 skills / MCP / rules / subagents 配置
-- `test/e2e.js`：E2E 脚本
-- `test/bridge-smoke.js`：本地 bridge 冒烟测试
+- `test/`：轻量回归和 agentconfig 冒烟测试
 - `test/shots/`：关键页面截图
 
 ## 本地启动
@@ -142,16 +141,7 @@ npm run dist:linux
 
 > 当前 `app/scripts/prepare.js` 会自动解析并复制本机平台的 native agent runtime。要正式发布三平台安装包，建议在各自平台 CI 上分别执行构建。
 
-## E2E
-
-### 本地 bridge 冒烟测试
-
-```bash
-cd app
-npm run smoke:bridge
-```
-
-### 已验证场景
+## 已验证场景
 
 1. 应用启动进入“就绪”
 2. 中文对话流式回复

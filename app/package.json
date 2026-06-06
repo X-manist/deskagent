@@ -18,8 +18,6 @@
   "scripts": {
     "start": "electron .",
     "prepackage": "node scripts/prepare.js",
-    "smoke:bridge": "node ../test/bridge-smoke.js",
-    "e2e": "node ../test/e2e.js",
     "dist": "npm run prepackage && electron-builder",
     "dist:mac": "npm run prepackage -- --platform=darwin --arch=arm64 && electron-builder --mac",
     "dist:win": "npm run prepackage -- --platform=win32 --arch=x64 && electron-builder --win",
