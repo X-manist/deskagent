@@ -67,11 +67,9 @@ async fn create_order(
     let (name, model, points, models_json, price, days) =
         pkg.ok_or_else(|| AppError::bad("套餐不存在或已下架"))?;
     let models = parse_models_json(&models_json, &model);
-    let primary_model = models
-        .first()
-        .cloned()
-        .unwrap_or_else(|| model.clone());
-    let models_json = serde_json::to_string(&models).unwrap_or_else(|_| format!("[\"{}\"]", primary_model));
+    let primary_model = models.first().cloned().unwrap_or_else(|| model.clone());
+    let models_json =
+        serde_json::to_string(&models).unwrap_or_else(|_| format!("[\"{}\"]", primary_model));
 
     let out_trade_no = crate::crypto::out_trade_no();
     sqlx::query(
@@ -139,11 +137,9 @@ pub async fn grant_order(
     .await?;
     let (user_id, model, points, models_json, days) = order;
     let models = parse_models_json(&models_json, &model);
-    let primary_model = models
-        .first()
-        .cloned()
-        .unwrap_or_else(|| model.clone());
-    let models_json = serde_json::to_string(&models).unwrap_or_else(|_| format!("[\"{}\"]", primary_model));
+    let primary_model = models.first().cloned().unwrap_or_else(|| model.clone());
+    let models_json =
+        serde_json::to_string(&models).unwrap_or_else(|_| format!("[\"{}\"]", primary_model));
 
     sqlx::query(
         "INSERT INTO entitlements (user_id, order_id, model, token_allowance, token_multiplier, points, models_json, expires_at, status)
@@ -165,7 +161,10 @@ pub async fn grant_order(
         &st.db,
         "system",
         "grant_order",
-        &format!("{out_trade_no} -> user {user_id} {points} points [{}]/{days}d", models.join(", ")),
+        &format!(
+            "{out_trade_no} -> user {user_id} {points} points [{}]/{days}d",
+            models.join(", ")
+        ),
     )
     .await;
     Ok(true)

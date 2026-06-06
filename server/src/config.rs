@@ -317,10 +317,8 @@ impl Config {
             upstream_api_key,
             default_model,
             models,
-            free_points: ev("FREE_POINTS", "80000").parse().unwrap_or(80_000),
-            free_points_duration_days: ev("FREE_POINTS_DURATION_DAYS", "30")
-                .parse()
-                .unwrap_or(30),
+            free_points: ev("FREE_POINTS", "100").parse().unwrap_or(100),
+            free_points_duration_days: ev("FREE_POINTS_DURATION_DAYS", "30").parse().unwrap_or(30),
             free_models,
             reserve_tokens: ev("RESERVE_TOKENS", "4000").parse().unwrap_or(4000),
             max_body_bytes: ev("MAX_BODY_BYTES", "2097152").parse().unwrap_or(2_097_152),

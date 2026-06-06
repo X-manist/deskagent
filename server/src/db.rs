@@ -28,13 +28,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         "REAL NOT NULL DEFAULT 1.0",
     )
     .await?;
-    ensure_column(
-        pool,
-        "packages",
-        "points",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
+    ensure_column(pool, "packages", "points", "INTEGER NOT NULL DEFAULT 0").await?;
     ensure_column(
         pool,
         "packages",
@@ -49,13 +43,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         "REAL NOT NULL DEFAULT 1.0",
     )
     .await?;
-    ensure_column(
-        pool,
-        "orders",
-        "pkg_points",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
+    ensure_column(pool, "orders", "pkg_points", "INTEGER NOT NULL DEFAULT 0").await?;
     ensure_column(
         pool,
         "orders",
@@ -70,13 +58,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         "REAL NOT NULL DEFAULT 1.0",
     )
     .await?;
-    ensure_column(
-        pool,
-        "entitlements",
-        "points",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
-    .await?;
+    ensure_column(pool, "entitlements", "points", "INTEGER NOT NULL DEFAULT 0").await?;
     ensure_column(
         pool,
         "entitlements",
@@ -90,6 +72,14 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
           point_multiplier REAL NOT NULL,
           updated_at TEXT NOT NULL DEFAULT (datetime('now')),
           updated_by TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS migration_flags (
+          flag TEXT PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
         )",
     )
     .execute(pool)
@@ -134,6 +124,64 @@ async fn backfill_points(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    normalize_legacy_point_pricing_once(pool).await?;
+    Ok(())
+}
+
+async fn normalize_legacy_point_pricing_once(pool: &SqlitePool) -> Result<()> {
+    let already_applied: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM migration_flags WHERE flag = ?")
+            .bind("points_v2_cents")
+            .fetch_one(pool)
+            .await?;
+    if already_applied > 0 {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    // Old package rows stored token allowances as points. In the new display
+    // model, 1 RMB = 100 integer points, so cents map directly to points.
+    sqlx::query(
+        "UPDATE packages
+         SET points = price_cents,
+             total_tokens = price_cents
+         WHERE price_cents > 0 AND points >= 100000",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE orders
+         SET pkg_points = amount_cents,
+             pkg_tokens = amount_cents
+         WHERE amount_cents > 0 AND pkg_points >= 100000",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE entitlements
+         SET points = (
+               SELECT orders.amount_cents FROM orders WHERE orders.id = entitlements.order_id
+             ),
+             token_allowance = (
+               SELECT orders.amount_cents FROM orders WHERE orders.id = entitlements.order_id
+             )
+         WHERE order_id IS NOT NULL
+           AND points >= 100000
+           AND EXISTS (
+             SELECT 1 FROM orders
+             WHERE orders.id = entitlements.order_id AND orders.amount_cents > 0
+           )",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO migration_flags (flag) VALUES (?)")
+        .bind("points_v2_cents")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -184,27 +232,13 @@ pub async fn bootstrap(pool: &SqlitePool, cfg: &Config) -> Result<()> {
             (
                 "体验月卡",
                 cfg.default_model.as_str(),
-                1_000_000i64,
+                1990i64,
                 1990i64,
                 30i64,
                 1i64,
             ),
-            (
-                "标准月卡",
-                cfg.default_model.as_str(),
-                3_000_000,
-                4990,
-                30,
-                2,
-            ),
-            (
-                "年度会员",
-                cfg.default_model.as_str(),
-                40_000_000,
-                49900,
-                365,
-                3,
-            ),
+            ("标准月卡", cfg.default_model.as_str(), 4990, 4990, 30, 2),
+            ("年度会员", cfg.default_model.as_str(), 49900, 49900, 365, 3),
         ];
         for (name, model, tokens, price, days, sort) in defaults {
             sqlx::query(

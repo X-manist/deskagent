@@ -8,6 +8,7 @@ use crate::auth::{issue_admin_token, issue_user_token, AuthAdmin};
 use crate::crypto;
 use crate::db;
 use crate::error::{AppError, AppResult};
+use crate::meter;
 use crate::models;
 use crate::state::AppState;
 
@@ -38,7 +39,10 @@ fn normalize_requested_models(
         .filter(|model| !model.is_empty())
         .collect::<Vec<_>>();
     if out.is_empty() {
-        if let Some(model) = legacy_model.map(str::trim).filter(|model| !model.is_empty()) {
+        if let Some(model) = legacy_model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
             out.push(model.to_string());
         }
     }
@@ -124,17 +128,19 @@ async fn stats(State(st): State<AppState>, _a: AuthAdmin) -> AppResult<Json<serd
         sqlx::query_scalar("SELECT COALESCE(SUM(total_tokens),0) FROM usage_sessions")
             .fetch_one(&st.db)
             .await?;
-    let total_points: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(reserved_tokens),0) FROM usage_sessions")
-            .fetch_one(&st.db)
-            .await?;
+    let total_point_micros: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(reserved_tokens),0) FROM usage_sessions
+         WHERE status IN ('completed','usage_unknown')",
+    )
+    .fetch_one(&st.db)
+    .await?;
     Ok(Json(json!({
         "users_total": users,
         "users_new_today": new_today,
         "orders_paid": paid_orders,
         "revenue_cents": revenue_cents,
         "revenue_yuan": format!("{:.2}", revenue_cents as f64 / 100.0),
-        "points_used_total": total_points.max(0),
+        "points_used_total": meter::display_used_points(total_point_micros),
         "tokens_total": total_tokens,
     })))
 }
@@ -240,16 +246,25 @@ async fn list_users(
         .bind(id)
         .fetch_one(&st.db)
         .await?;
-        let points_used: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(reserved_tokens),0) FROM usage_sessions WHERE user_id = ?",
+        let point_micros_used: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(reserved_tokens),0) FROM usage_sessions
+             WHERE user_id = ? AND status IN ('completed','usage_unknown')",
         )
         .bind(id)
         .fetch_one(&st.db)
         .await?;
-        let points_remaining: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM((CASE WHEN points > 0 THEN points ELSE token_allowance END) - tokens_used),0) FROM entitlements
+        let point_micros_remaining: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(
+               CASE
+                 WHEN (((CASE WHEN points > 0 THEN points ELSE token_allowance END) * ?) - tokens_used) > 0
+                 THEN (((CASE WHEN points > 0 THEN points ELSE token_allowance END) * ?) - tokens_used)
+                 ELSE 0
+               END
+             ),0) FROM entitlements
              WHERE user_id = ? AND status='active' AND expires_at > datetime('now')",
         )
+        .bind(meter::POINT_SCALE)
+        .bind(meter::POINT_SCALE)
         .bind(id)
         .fetch_one(&st.db)
         .await?;
@@ -270,8 +285,9 @@ async fn list_users(
                     "model": model,
                     "models": models,
                     "points": points,
-                    "points_used": used,
-                    "points_remaining": (points - used).max(0),
+                    "points_used": meter::display_used_points(used),
+                    "points_used_micros": used.max(0),
+                    "points_remaining": meter::display_remaining_points(points, used),
                     "expires_at": expires_at,
                 })
             })
@@ -296,8 +312,8 @@ async fn list_users(
         .await?;
         list.push(json!({
             "id": id, "phone": phone,
-            "points_remaining": points_remaining.max(0),
-            "points_used": points_used.max(0),
+            "points_remaining": meter::display_points_from_micros(point_micros_remaining),
+            "points_used": meter::display_used_points(point_micros_used),
             "entitlements": entitlements,
             "models": models,
             "tokens": tokens,
@@ -350,7 +366,7 @@ async fn create_test_user(
     if allowance < 0 {
         return Err(AppError::bad("测试积分不能为负数"));
     }
-    if allowance > i64::from(i32::MAX) * 1_000_000 {
+    if allowance > i64::from(i32::MAX) {
         return Err(AppError::bad("测试积分过大"));
     }
     let duration_days = req.duration_days.unwrap_or(30);
@@ -535,6 +551,9 @@ fn validate_package(st: &AppState, req: &PackageReq) -> AppResult<(i64, Vec<Stri
     let points = package_points(req);
     if points <= 0 {
         return Err(AppError::bad("套餐积分数必须大于 0"));
+    }
+    if points > i64::from(i32::MAX) {
+        return Err(AppError::bad("套餐积分数过大"));
     }
     if req.price_cents < 0 {
         return Err(AppError::bad("套餐价格不能为负数"));

@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS usage_sessions (
   source           TEXT NOT NULL,           -- 'free' | 'entitlement'
   entitlement_id   INTEGER REFERENCES entitlements(id),
   model            TEXT,
-  reserved_tokens  INTEGER NOT NULL DEFAULT 0,
+  reserved_tokens  INTEGER NOT NULL DEFAULT 0, -- charged point micros for this request
   prompt_tokens    INTEGER NOT NULL DEFAULT 0,
   completion_tokens INTEGER NOT NULL DEFAULT 0,
   total_tokens     INTEGER NOT NULL DEFAULT 0,
@@ -97,6 +97,11 @@ CREATE TABLE IF NOT EXISTS usage_sessions (
   finished_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS migration_flags (
+  flag       TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- Admin-overridden model pricing. Config/env values are defaults; rows here
 -- take precedence immediately without requiring a server restart.

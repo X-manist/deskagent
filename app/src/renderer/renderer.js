@@ -103,7 +103,7 @@ function renderModelSelect() {
     opt.value = model.id;
     opt.textContent = modelDisplayName(model);
     opt.disabled = model.configured === false;
-    if (model.point_multiplier) opt.title = `${Number(model.point_multiplier).toFixed(2)} 积分/token`;
+    if (model.point_multiplier) opt.title = `${Number(model.point_multiplier).toFixed(2)} 积分/百万 token`;
     modelTag.appendChild(opt);
   });
   const nextValue = options.some((model) => model.id === currentModel) ? currentModel : options[0].id;

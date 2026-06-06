@@ -97,7 +97,7 @@ function ModelCheckboxes({ models, value, onChange, disabled }) {
             }}
           />
           <span>{modelName(model)}{model.configured === false ? '（未配置密钥）' : ''}</span>
-          {model.point_multiplier ? <em>{Number(model.point_multiplier).toFixed(2)} 积分/token</em> : null}
+          {model.point_multiplier ? <em>{Number(model.point_multiplier).toFixed(2)} 积分/百万 token</em> : null}
         </label>
       ))}
     </div>
@@ -143,7 +143,7 @@ function Users() {
   const [list, setList] = useState([]);
   const [err, setErr] = useState('');
   const [phone, setPhone] = useState('');
-  const [points, setPoints] = useState('1000000');
+  const [points, setPoints] = useState('100');
   const [selectedModels, setSelectedModels] = useState([]);
   const [durationDays, setDurationDays] = useState('30');
   const [created, setCreated] = useState(null);
@@ -190,7 +190,7 @@ function Users() {
           </div>
           <div className="field small-field">
             <label>测试积分额度</label>
-            <input type="number" min="0" step="1000" value={points} onChange={(e) => setPoints(e.target.value)} />
+            <input type="number" min="0" step="1" value={points} onChange={(e) => setPoints(e.target.value)} />
           </div>
           <div className="field model-field">
             <label>可用模型</label>
@@ -264,7 +264,7 @@ function Orders() {
 const EMPTY_PKG = {
   name: '',
   models: ['glm-5.1'],
-  points: 1000000,
+  points: 1990,
   price_cents: 1990,
   duration_days: 30,
   active: true,
@@ -300,7 +300,7 @@ function PackageModal({ initial, models, defaultModel, onClose, onSaved }) {
         <h2>{p.id ? '编辑套餐' : '新建套餐'}</h2>
         <div className="field"><label>名称</label><input value={p.name} onChange={(e) => set('name', e.target.value)} /></div>
         <div className="field"><label>可用模型</label><ModelCheckboxes models={models} value={p.models || [p.model || defaultModel]} onChange={(value) => set('models', value)} /></div>
-        <div className="field"><label>积分数</label><input type="number" min="1" value={p.points || p.total_tokens} onChange={(e) => set('points', e.target.value)} /></div>
+        <div className="field"><label>积分数（1 RMB = 100 积分）</label><input type="number" min="1" step="1" value={p.points || p.total_tokens} onChange={(e) => set('points', e.target.value)} /></div>
         <div className="field"><label>价格(分)</label><input type="number" value={p.price_cents} onChange={(e) => set('price_cents', e.target.value)} /></div>
         <div className="field"><label>有效天数</label><input type="number" value={p.duration_days} onChange={(e) => set('duration_days', e.target.value)} /></div>
         <div className="row">
@@ -413,7 +413,7 @@ function ModelPricing() {
         <div className="model-pricing-head">
           <div>
             <h3>模型积分消耗比例</h3>
-            <p>这里设置的是每 1 个模型 token 消耗多少积分，保存后云端计费和客户端模型下拉会立即使用新的比例。</p>
+            <p>1x 表示 100 万模型 token 消耗 1 积分；服务端按 6 位精度扣费，客户端和管理端按整数积分展示。</p>
           </div>
           <div className="row">
             <button onClick={save} disabled={saving || !models.length}>{saving ? '保存中…' : '保存倍率'}</button>
@@ -426,7 +426,7 @@ function ModelPricing() {
       <table>
         <thead>
           <tr>
-            <th>模型</th><th>Provider</th><th>配置状态</th><th>默认倍率</th><th>当前积分/token</th><th>来源</th>
+            <th>模型</th><th>Provider</th><th>配置状态</th><th>默认倍率</th><th>当前积分/百万 token</th><th>来源</th>
           </tr>
         </thead>
         <tbody>

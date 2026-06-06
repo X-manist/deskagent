@@ -6,6 +6,7 @@ use serde_json::json;
 
 use crate::auth::{issue_user_token, AuthUser};
 use crate::error::{AppError, AppResult};
+use crate::meter;
 use crate::models;
 use crate::sms;
 use crate::state::AppState;
@@ -29,11 +30,12 @@ async fn grant_free_points(st: &AppState, uid: i64) -> AppResult<()> {
     if st.cfg.free_points <= 0 {
         return Ok(());
     }
-    let existing_free_grants: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM entitlements WHERE user_id = ? AND order_id IS NULL")
-            .bind(uid)
-            .fetch_one(&st.db)
-            .await?;
+    let existing_free_grants: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM entitlements WHERE user_id = ? AND order_id IS NULL",
+    )
+    .bind(uid)
+    .fetch_one(&st.db)
+    .await?;
     if existing_free_grants > 0 {
         return Ok(());
     }
@@ -53,7 +55,8 @@ async fn grant_free_points(st: &AppState, uid: i64) -> AppResult<()> {
         .first()
         .cloned()
         .unwrap_or_else(|| st.cfg.default_model.clone());
-    let models_json = serde_json::to_string(&models).unwrap_or_else(|_| format!("[\"{}\"]", primary));
+    let models_json =
+        serde_json::to_string(&models).unwrap_or_else(|_| format!("[\"{}\"]", primary));
     sqlx::query(
         "INSERT INTO entitlements (user_id, order_id, model, token_allowance, token_multiplier, points, models_json, expires_at, status)
          VALUES (?, NULL, ?, ?, 1.0, ?, ?, datetime('now', ?), 'active')",
@@ -235,11 +238,10 @@ async fn sms_verify(
 }
 
 async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
-    let phone: String =
-        sqlx::query_scalar("SELECT phone FROM users WHERE id = ?")
-            .bind(uid)
-            .fetch_one(&st.db)
-            .await?;
+    let phone: String = sqlx::query_scalar("SELECT phone FROM users WHERE id = ?")
+        .bind(uid)
+        .fetch_one(&st.db)
+        .await?;
 
     let ents: Vec<(i64, String, i64, String, i64, String)> = sqlx::query_as(
         "SELECT id, model, CASE WHEN points > 0 THEN points ELSE token_allowance END, models_json, tokens_used, expires_at FROM entitlements
@@ -255,7 +257,10 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
         .into_iter()
         .map(|(id, model, points, models_json, used, exp)| {
             let models = parse_models_json(&models_json, &model);
-            if points - used > 0 {
+            let remaining_micros = meter::remaining_point_micros(points, used);
+            let remaining_points = meter::display_points_from_micros(remaining_micros);
+            let used_points = meter::display_used_points(used);
+            if remaining_micros > 0 {
                 allowed_models.extend(models.iter().cloned());
             }
             json!({
@@ -264,9 +269,11 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
                 "models": models,
                 "token_allowance": points,
                 "points": points,
-                "tokens_used": used,
-                "tokens_remaining": (points - used).max(0),
-                "points_remaining": (points - used).max(0),
+                "tokens_used": used_points,
+                "tokens_remaining": remaining_points,
+                "points_used": used_points,
+                "points_used_micros": used.max(0),
+                "points_remaining": remaining_points,
                 "expires_at": exp,
             })
         })
@@ -296,7 +303,11 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
         .collect::<Vec<_>>();
     let points_remaining: i64 = entitlements
         .iter()
-        .map(|item| item.get("points_remaining").and_then(|v| v.as_i64()).unwrap_or(0))
+        .map(|item| {
+            item.get("points_remaining")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+        })
         .sum();
 
     Ok(json!({
