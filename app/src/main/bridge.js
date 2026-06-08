@@ -187,6 +187,7 @@ class LocalBridge {
       if (req.method === 'POST' && url.pathname === '/open-app') return json(res, 200, await this.openApp(await this._readBody(req)));
       if (req.method === 'POST' && url.pathname === '/desktop/action') return json(res, 200, await this.desktopAction(await this._readBody(req)));
       if (req.method === 'POST' && url.pathname === '/desktop/screenshot') return json(res, 200, await this.takeScreenshot(await this._readBody(req)));
+      if (req.method === 'POST' && url.pathname === '/remote/share-file') return json(res, 200, await this.shareRemoteFile(await this._readBody(req)));
       if (req.method === 'POST' && url.pathname === '/email/send') return json(res, 200, await this.sendEmail(await this._readBody(req)));
       if (req.method === 'POST' && url.pathname === '/email/read') return json(res, 200, await this.readEmail(await this._readBody(req)));
       if (req.method === 'POST' && url.pathname === '/wechat/send') return json(res, 200, await this.sendWeChat(await this._readBody(req)));
@@ -859,6 +860,38 @@ class LocalBridge {
       mode: 'macos-ui-automation',
       content,
       message: '已尝试读取当前 WeChat 窗口的可见消息；若结果不完整，请先手动聚焦到目标对话再重试。',
+    };
+  }
+
+  _normalizeRemoteSharePaths(payload = {}) {
+    const raw = [];
+    if (payload.path) raw.push(payload.path);
+    if (payload.file) raw.push(payload.file);
+    if (Array.isArray(payload.paths)) raw.push(...payload.paths);
+    if (Array.isArray(payload.files)) {
+      for (const item of payload.files) {
+        raw.push(typeof item === 'string' ? item : item && (item.path || item.file));
+      }
+    }
+    return raw
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .map((item) => (path.isAbsolute(item) ? item : path.resolve(this.opts.workspaceDir, item)));
+  }
+
+  async shareRemoteFile(payload = {}) {
+    if (typeof this.opts.shareRemoteFile !== 'function') {
+      throw new Error('远程手机端文件发送服务未初始化');
+    }
+    const paths = this._normalizeRemoteSharePaths(payload);
+    if (!paths.length) throw new Error('缺少要发送到手机端的文件路径');
+    const missing = paths.find((filePath) => !fs.existsSync(filePath));
+    if (missing) throw new Error(`文件不存在：${missing}`);
+    const result = await this.opts.shareRemoteFile({ paths });
+    return {
+      ok: true,
+      message: '已发送到远程手机端文件列表',
+      ...(result || {}),
     };
   }
 

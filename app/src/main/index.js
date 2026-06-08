@@ -523,6 +523,12 @@ function bridgeOptions() {
       ? path.join(process.resourcesPath, 'deskagent-mcp.js')
       : path.join(__dirname, '..', 'mcp', 'deskagent-mcp.js'),
     mcpEnv: { ELECTRON_RUN_AS_NODE: '1' },
+    shareRemoteFile: async ({ paths: filePaths }) => {
+      if (!remoteHost) throw new Error('远程连接服务未初始化');
+      if (!isLoggedIn()) throw new Error('请先登录后再发送文件到手机端');
+      if (!remoteHost.running) await startRemoteHost();
+      return remoteHost.sharePaths(filePaths || []);
+    },
   };
 }
 
@@ -538,6 +544,7 @@ function createRemoteHost() {
     appVersion: app.getVersion ? app.getVersion() : '0.1.0',
     auth: () => auth,
     engine: () => engine,
+    backendUrl: () => backendUrl(),
   });
   wireRemoteEvents();
 }

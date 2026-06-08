@@ -31,6 +31,7 @@ pub struct Config {
     // Per-request token reservation when a precise estimate is unavailable.
     pub reserve_tokens: i64,
     pub max_body_bytes: usize,
+    pub remote_relay_file_max_bytes: usize,
     // Allow the test/demo "manual" payment confirmation to grant entitlements.
     // MUST be false in production once real payment providers are configured.
     pub allow_manual_pay: bool,
@@ -322,6 +323,9 @@ impl Config {
             free_models,
             reserve_tokens: ev("RESERVE_TOKENS", "4000").parse().unwrap_or(4000),
             max_body_bytes: ev("MAX_BODY_BYTES", "2097152").parse().unwrap_or(2_097_152),
+            remote_relay_file_max_bytes: ev("REMOTE_RELAY_FILE_MAX_BYTES", "5242880")
+                .parse()
+                .unwrap_or(5_242_880),
             allow_manual_pay: ev("ALLOW_MANUAL_PAY", "false") == "true",
             sms_provider: ev("SMS_PROVIDER", "aliyun_pnvs"),
             sms_code_ttl_secs: ev("SMS_CODE_TTL_SECS", "300").parse().unwrap_or(300),
