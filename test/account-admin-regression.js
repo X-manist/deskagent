@@ -72,4 +72,18 @@ const userRoutes = read('server/src/routes/user.rs');
 assert(userRoutes.includes('points_used_micros'), 'user API preserves precise metering for diagnostics');
 assert(userRoutes.includes('display_points_from_micros(remaining_micros)'), 'user API returns integer remaining points');
 
+const rendererHtml = read('app/src/renderer/index.html');
+const rendererSource = read('app/src/renderer/renderer.js');
+const preloadSource = read('app/src/preload/preload.js');
+const mainSource = read('app/src/main/index.js');
+assert(!rendererHtml.includes('打开工作目录'), 'desktop sidebar removes ambiguous open-workspace action');
+assert(!preloadSource.includes('openWorkspace'), 'preload no longer exposes open-workspace IPC');
+assert(!mainSource.includes('app:openWorkspace'), 'main process no longer registers open-workspace IPC');
+assert(rendererHtml.includes('shareRemoteFile'), 'desktop sidebar exposes send-file action');
+assert(preloadSource.includes('remote:shareFiles'), 'preload exposes remote file sharing IPC');
+assert(mainSource.includes('remote:shareFiles'), 'main process registers remote file sharing IPC');
+assert(rendererSource.includes('startAccountBadgePolling'), 'account badge refreshes on an interval');
+assert(rendererSource.includes("window.api.on('chat:turnDone'"), 'account badge refreshes after a completed turn');
+assert(rendererSource.includes('scheduleRemoteAutoRefresh'), 'remote pairing is scheduled for automatic refresh');
+
 console.log('account/admin regression assertions passed');

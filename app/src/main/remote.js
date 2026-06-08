@@ -3,14 +3,19 @@ const { EventEmitter } = require('events');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
+const path = require('path');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const nacl = require('tweetnacl');
 
-const PAIRING_TTL_MS = 10 * 60 * 1000;
+const PAIRING_TTL_MS = 24 * 60 * 60 * 1000;
+const FILE_SHARE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 256 * 1024;
 const REMOTE_TURN_TTL_MS = 15 * 60 * 1000;
 const MAX_REMOTE_EVENTS = 500;
+const MAX_ZIP32_SIZE = 0xffffffff;
+
+let crcTable = null;
 
 function stableMachineId(baseDir) {
   return 'deskagent-' + crypto.createHash('sha256').update(String(baseDir || os.hostname())).digest('hex').slice(0, 24);
@@ -25,6 +30,220 @@ function randomCode() {
 
 function base64url(buf) {
   return Buffer.from(buf).toString('base64url');
+}
+
+function crc32Table() {
+  if (crcTable) return crcTable;
+  crcTable = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    crcTable[i] = c >>> 0;
+  }
+  return crcTable;
+}
+
+function crc32(buf) {
+  const table = crc32Table();
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i += 1) {
+    crc = table[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function dosDateTime(ms) {
+  const d = new Date(ms || Date.now());
+  const year = Math.max(1980, d.getFullYear());
+  return {
+    time: (d.getHours() << 11) | (d.getMinutes() << 5) | Math.floor(d.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+  };
+}
+
+function zipNameSegment(value) {
+  return String(value || 'file')
+    .replace(/[\0\\/]+/g, '_')
+    .trim() || 'file';
+}
+
+function collectZipEntries(inputPaths) {
+  const entries = [];
+  const walk = (absPath, zipName) => {
+    const stat = fs.statSync(absPath);
+    if (stat.isDirectory()) {
+      for (const child of fs.readdirSync(absPath)) {
+        walk(path.join(absPath, child), path.posix.join(zipName, zipNameSegment(child)));
+      }
+      return;
+    }
+    if (!stat.isFile()) return;
+    if (stat.size > MAX_ZIP32_SIZE) {
+      throw new Error('目录或多文件打包暂不支持超过 4GB 的单个文件，请直接发送该大文件');
+    }
+    entries.push({ absPath, zipName: zipName.replace(/^\/+/, '') || zipNameSegment(path.basename(absPath)), stat });
+  };
+  for (const item of inputPaths) {
+    const absPath = path.resolve(item);
+    if (!fs.existsSync(absPath)) throw new Error(`文件不存在：${absPath}`);
+    walk(absPath, zipNameSegment(path.basename(absPath)));
+  }
+  if (!entries.length) throw new Error('没有可分享的文件');
+  return entries;
+}
+
+function writeAll(fd, buf) {
+  fs.writeSync(fd, buf, 0, buf.length);
+}
+
+function createZipArchive(inputPaths, outputPath) {
+  const entries = collectZipEntries(inputPaths);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const central = [];
+  let offset = 0;
+  const fd = fs.openSync(outputPath, 'w');
+  try {
+    for (const entry of entries) {
+      const data = fs.readFileSync(entry.absPath);
+      const nameBuf = Buffer.from(entry.zipName, 'utf8');
+      const { time, date } = dosDateTime(entry.stat.mtimeMs);
+      const checksum = crc32(data);
+      const local = Buffer.alloc(30);
+      local.writeUInt32LE(0x04034b50, 0);
+      local.writeUInt16LE(20, 4);
+      local.writeUInt16LE(0x0800, 6);
+      local.writeUInt16LE(0, 8);
+      local.writeUInt16LE(time, 10);
+      local.writeUInt16LE(date, 12);
+      local.writeUInt32LE(checksum, 14);
+      local.writeUInt32LE(data.length, 18);
+      local.writeUInt32LE(data.length, 22);
+      local.writeUInt16LE(nameBuf.length, 26);
+      local.writeUInt16LE(0, 28);
+      writeAll(fd, local);
+      writeAll(fd, nameBuf);
+      writeAll(fd, data);
+      central.push({ nameBuf, checksum, size: data.length, time, date, offset });
+      offset += local.length + nameBuf.length + data.length;
+    }
+    const centralOffset = offset;
+    for (const entry of central) {
+      const header = Buffer.alloc(46);
+      header.writeUInt32LE(0x02014b50, 0);
+      header.writeUInt16LE(20, 4);
+      header.writeUInt16LE(20, 6);
+      header.writeUInt16LE(0x0800, 8);
+      header.writeUInt16LE(0, 10);
+      header.writeUInt16LE(entry.time, 12);
+      header.writeUInt16LE(entry.date, 14);
+      header.writeUInt32LE(entry.checksum, 16);
+      header.writeUInt32LE(entry.size, 20);
+      header.writeUInt32LE(entry.size, 24);
+      header.writeUInt16LE(entry.nameBuf.length, 28);
+      header.writeUInt16LE(0, 30);
+      header.writeUInt16LE(0, 32);
+      header.writeUInt16LE(0, 34);
+      header.writeUInt16LE(0, 36);
+      header.writeUInt32LE(0, 38);
+      header.writeUInt32LE(entry.offset, 42);
+      writeAll(fd, header);
+      writeAll(fd, entry.nameBuf);
+      offset += header.length + entry.nameBuf.length;
+    }
+    const centralSize = offset - centralOffset;
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(0, 4);
+    end.writeUInt16LE(0, 6);
+    end.writeUInt16LE(central.length, 8);
+    end.writeUInt16LE(central.length, 10);
+    end.writeUInt32LE(centralSize, 12);
+    end.writeUInt32LE(centralOffset, 16);
+    end.writeUInt16LE(0, 20);
+    writeAll(fd, end);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return { entryCount: entries.length };
+}
+
+function prepareShareArtifact(inputPaths, cacheDir) {
+  const resolved = (inputPaths || []).map((item) => path.resolve(String(item || ''))).filter(Boolean);
+  if (!resolved.length) throw new Error('请选择要发送到手机的文件或目录');
+  if (resolved.length === 1) {
+    const stat = fs.statSync(resolved[0]);
+    if (stat.isFile()) {
+      return {
+        filePath: resolved[0],
+        name: path.basename(resolved[0]) || 'download',
+        packaged: false,
+        temporary: false,
+        sourceCount: 1,
+      };
+    }
+  }
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const firstName = resolved.length === 1 ? zipNameSegment(path.basename(resolved[0])) : 'deskagent-share';
+  const name = `${firstName}-${stamp}.zip`;
+  const filePath = path.join(cacheDir, name);
+  const zipInfo = createZipArchive(resolved, filePath);
+  return {
+    filePath,
+    name,
+    packaged: true,
+    temporary: true,
+    sourceCount: resolved.length,
+    entryCount: zipInfo.entryCount,
+  };
+}
+
+function asciiFilenameFallback(name) {
+  return String(name || 'download')
+    .replace(/[^\x20-\x7e]/g, '_')
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .trim()
+    .slice(0, 180) || 'download';
+}
+
+function encodeRfc5987(value) {
+  return encodeURIComponent(String(value || 'download'))
+    .replace(/['()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/\*/g, '%2A');
+}
+
+function contentDispositionAttachment(name) {
+  const fallback = asciiFilenameFallback(name).replace(/["\\]/g, '_');
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeRfc5987(name || fallback)}`;
+}
+
+function contentTypeFor(name) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  if (ext === '.zip') return 'application/zip';
+  if (ext === '.pdf') return 'application/pdf';
+  if (ext === '.png') return 'image/png';
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.txt' || ext === '.md' || ext === '.csv') return 'text/plain; charset=utf-8';
+  return 'application/octet-stream';
+}
+
+function remoteActivityDisplay(payload = {}) {
+  if (payload.display) return payload.display;
+  if (payload.kind === 'file') return '已修改文件：' + (payload.files || []).join(', ');
+  if (payload.kind === 'reasoning') return payload.text || '思考中';
+  if (payload.kind === 'command') {
+    const status = payload.phase === 'started' || payload.phase === 'delta' ? '正在执行命令' : '命令执行完成';
+    return [status, payload.text || '', payload.output ? `输出：${payload.output}` : ''].filter(Boolean).join('\n');
+  }
+  if (payload.kind === 'tool') {
+    const status = payload.phase === 'started' || payload.phase === 'progress' ? '正在调用工具' : '工具调用完成';
+    return [status, payload.text || '', payload.output ? `结果：${payload.output}` : ''].filter(Boolean).join('\n');
+  }
+  return payload.text || '';
 }
 
 function fromBase64url(value) {
@@ -222,6 +441,10 @@ function remotePageHtml() {
     .side-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:12px; border-bottom:1px solid var(--line); }
     .side-title { font-size:13px; font-weight:750; color:var(--muted); }
     .sessions { padding:8px; overflow:auto; display:flex; flex-direction:column; gap:7px; }
+    .files { flex:0 0 auto; border-top:1px solid var(--line); padding:8px; display:flex; flex-direction:column; gap:7px; max-height:34%; overflow:auto; }
+    .file-link { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px; border:1px solid var(--line); border-radius:8px; color:var(--text); background:transparent; text-decoration:none; }
+    .file-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:650; }
+    .file-meta { flex:0 0 auto; color:var(--muted); font-size:11px; }
     .session { width:100%; text-align:left; color:var(--text); background:transparent; border:1px solid transparent; border-radius:8px; padding:9px; cursor:pointer; }
     .session.active { border-color:rgba(37,99,235,.28); background:#eff6ff; }
     .session-title { font-size:14px; line-height:1.38; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
@@ -233,8 +456,12 @@ function remotePageHtml() {
     .me { align-self:flex-end; background:var(--accent); color:white; border-bottom-right-radius:5px; }
     .ai { align-self:flex-start; border:1px solid var(--line); background:var(--surface); border-bottom-left-radius:5px; }
     .sys { align-self:center; max-width:100%; border:1px solid var(--line); background:var(--surface); color:var(--muted); font-size:13px; }
+    .activity-msg { display:inline-flex; align-items:center; gap:8px; text-align:left; }
+    .activity-spin { width:14px; height:14px; border:2px solid rgba(37,99,235,.22); border-top-color:var(--accent); border-radius:999px; animation:spin .8s linear infinite; }
+    .activity-done .activity-spin { display:none; }
     .streaming::after { content:""; display:inline-block; width:6px; height:1em; margin-left:3px; vertical-align:-2px; background:var(--accent2); animation:blink 1s steps(2,end) infinite; }
     @keyframes blink { 0%,45%{opacity:1} 46%,100%{opacity:0} }
+    @keyframes spin { to { transform:rotate(360deg); } }
     form { flex:0 0 auto; display:flex; gap:9px; padding:10px; border-top:1px solid var(--line); background:var(--surface); }
     textarea { flex:1; min-height:48px; max-height:140px; resize:vertical; padding:10px 11px; border:1px solid var(--line); border-radius:10px; color:var(--text); background:var(--surface); font:inherit; font-size:16px; line-height:1.45; }
     button { flex:0 0 auto; min-width:76px; border:0; border-radius:10px; color:white; background:var(--accent); font:inherit; font-weight:700; cursor:pointer; }
@@ -282,6 +509,13 @@ function remotePageHtml() {
           <span class="pill" id="sessionCount">0</span>
         </div>
         <div class="sessions" id="sessions"></div>
+        <div class="files">
+          <div class="side-head" style="padding:0 0 6px;border:0">
+            <div class="side-title">可下载文件</div>
+            <span class="pill" id="fileCount">0</span>
+          </div>
+          <div id="files"></div>
+        </div>
       </aside>
       <section class="panel chat">
         <div class="status" id="status">正在建立加密直连…</div>
@@ -305,6 +539,8 @@ function remotePageHtml() {
     const messagesEl = document.getElementById('messages');
     const sessionsEl = document.getElementById('sessions');
     const sessionCountEl = document.getElementById('sessionCount');
+    const filesEl = document.getElementById('files');
+    const fileCountEl = document.getElementById('fileCount');
     const form = document.getElementById('form');
     const textEl = document.getElementById('text');
     const sendEl = document.getElementById('send');
@@ -318,6 +554,7 @@ function remotePageHtml() {
     let activeSeq = 0;
     let activeAiEl = null;
     let polling = false;
+    const activeActivities = new Map();
     const enc = new TextEncoder();
     const dec = new TextDecoder();
 
@@ -355,6 +592,66 @@ function remotePageHtml() {
       el.className = 'msg ' + cls;
       el.textContent = text;
       messagesEl.appendChild(el);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+    function formatSize(bytes) {
+      const value = Number(bytes || 0);
+      if (value >= 1024 * 1024 * 1024) return (value / 1024 / 1024 / 1024).toFixed(1) + ' GB';
+      if (value >= 1024 * 1024) return (value / 1024 / 1024).toFixed(1) + ' MB';
+      if (value >= 1024) return (value / 1024).toFixed(1) + ' KB';
+      return value + ' B';
+    }
+    function renderFiles(files) {
+      filesEl.innerHTML = '';
+      fileCountEl.textContent = String((files || []).length);
+      if (!(files || []).length) {
+        const empty = document.createElement('div');
+        empty.className = 'session-meta';
+        empty.textContent = '桌面端发送后会显示在这里';
+        filesEl.appendChild(empty);
+        return;
+      }
+      for (const file of files) {
+        const link = document.createElement('a');
+        link.className = 'file-link';
+        link.href = file.download_url;
+        link.target = '_blank';
+        link.rel = 'noreferrer';
+        link.download = file.name || '';
+        const name = document.createElement('span');
+        name.className = 'file-name';
+        name.textContent = file.name || 'download';
+        const meta = document.createElement('span');
+        meta.className = 'file-meta';
+        meta.textContent = formatSize(file.size);
+        link.appendChild(name);
+        link.appendChild(meta);
+        filesEl.appendChild(link);
+      }
+    }
+    async function loadFiles() {
+      const payload = await secure('/api/remote/direct/files', { t:'list_files', at:Date.now() });
+      renderFiles(payload.files || []);
+    }
+    function updateActivity(event) {
+      const key = event.item_id || event.kind || 'activity';
+      let el = activeActivities.get(key);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'msg sys activity-msg';
+        const spin = document.createElement('span');
+        spin.className = 'activity-spin';
+        const label = document.createElement('span');
+        label.className = 'activity-text';
+        el.appendChild(spin);
+        el.appendChild(label);
+        messagesEl.appendChild(el);
+        activeActivities.set(key, el);
+      }
+      const label = el.querySelector('.activity-text');
+      if (label) label.textContent = event.display || event.text || '工具执行中…';
+      const completed = event.phase === 'completed';
+      el.classList.toggle('activity-done', completed);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
     function stripThinkText(value) {
@@ -397,6 +694,8 @@ function remotePageHtml() {
       statusEl.textContent = payload.message || '已直连这台电脑';
       add('已建立端到端加密直连。');
       await loadSessions();
+      await loadFiles().catch(() => {});
+      setInterval(() => loadFiles().catch(() => {}), 10000);
       textEl.focus();
     }
     function renderSessions(list) {
@@ -485,6 +784,8 @@ function remotePageHtml() {
           ensureAiBubble().textContent = visibleText;
           activeAiEl.classList.remove('streaming');
         }
+      } else if (event.type === 'activity') {
+        updateActivity(event);
       } else if (event.type === 'error') {
         add(event.message || '远程任务失败', 'sys err');
         return true;
@@ -579,6 +880,7 @@ function remotePageHtml() {
         if (!failed) {
           statusEl.textContent = '回复完成';
           await loadSessions().catch(() => {});
+          await loadFiles().catch(() => {});
         }
       }
     }
@@ -633,6 +935,7 @@ class RemoteHost extends EventEmitter {
     this.inFlight = new Set();
     this.remoteTurns = new Map();
     this.wsClients = new Map();
+    this.fileShares = new Map();
     this.engineListeners = null;
   }
 
@@ -672,6 +975,7 @@ class RemoteHost extends EventEmitter {
     await this.closeServer();
     this.detachEngineListeners();
     this.remoteTurns.clear();
+    this.clearFileShares();
     this.emitState();
   }
 
@@ -783,12 +1087,14 @@ class RemoteHost extends EventEmitter {
       done: (payload) => this.captureRemoteEngineEvent('done', payload),
       error: (payload) => this.captureRemoteEngineEvent('error', payload),
       threadChanged: (payload) => this.captureRemoteEngineEvent('threadChanged', payload),
+      activity: (payload) => this.captureRemoteEngineEvent('activity', payload),
     };
     engine.on('delta', listeners.delta);
     engine.on('message', listeners.message);
     engine.on('turnDone', listeners.done);
     engine.on('turnError', listeners.error);
     engine.on('threadChanged', listeners.threadChanged);
+    engine.on('activity', listeners.activity);
     this.engineListeners = listeners;
   }
 
@@ -801,6 +1107,7 @@ class RemoteHost extends EventEmitter {
       prev.engine.off('turnDone', prev.done);
       prev.engine.off('turnError', prev.error);
       prev.engine.off('threadChanged', prev.threadChanged);
+      prev.engine.off('activity', prev.activity);
     }
     this.engineListeners = null;
   }
@@ -897,7 +1204,92 @@ class RemoteHost extends EventEmitter {
         stale_thread_id: payload.staleThreadId || null,
         recovered: !!payload.recovered,
       });
+    } else if (type === 'activity') {
+      this.pushRemoteEvent(turn, {
+        type: 'activity',
+        thread_id: payload.threadId,
+        item_id: payload.itemId || null,
+        kind: payload.kind || '',
+        phase: payload.phase || '',
+        status: payload.status || '',
+        text: payload.text || '',
+        output: payload.output || '',
+        display: remoteActivityDisplay(payload),
+      });
     }
+  }
+
+  pruneFileShares() {
+    const now = Date.now();
+    for (const [token, share] of this.fileShares.entries()) {
+      if (share.expiresAtMs > now && fs.existsSync(share.filePath)) continue;
+      this.fileShares.delete(token);
+      if (share.temporary) {
+        try { fs.rmSync(share.filePath, { force: true }); } catch (_) {}
+      }
+    }
+  }
+
+  clearFileShares() {
+    for (const share of this.fileShares.values()) {
+      if (share.temporary) {
+        try { fs.rmSync(share.filePath, { force: true }); } catch (_) {}
+      }
+    }
+    this.fileShares.clear();
+  }
+
+  directBaseUrl() {
+    const urls = this.port ? networkUrls(this.port) : [];
+    return urls[0] || (this.port ? `http://127.0.0.1:${this.port}` : '');
+  }
+
+  publicShare(share, baseUrl = '') {
+    const downloadPath = share.downloadPath;
+    return {
+      id: share.token,
+      token: share.token,
+      name: share.name,
+      size: share.size,
+      created_at: share.createdAt,
+      expires_at: share.expiresAt,
+      packaged: !!share.packaged,
+      source_count: share.sourceCount || 1,
+      entry_count: share.entryCount || 1,
+      download_path: downloadPath,
+      download_url: baseUrl ? new URL(downloadPath, baseUrl).toString() : downloadPath,
+    };
+  }
+
+  publicShares(baseUrl = '') {
+    this.pruneFileShares();
+    return [...this.fileShares.values()]
+      .sort((a, b) => b.createdAtMs - a.createdAtMs)
+      .map((share) => this.publicShare(share, baseUrl));
+  }
+
+  async sharePaths(inputPaths) {
+    if (!this.server) await this.ensureServer();
+    this.pruneFileShares();
+    const cacheDir = path.join(this.opts.baseDir || os.tmpdir(), 'remote-file-shares');
+    const prepared = prepareShareArtifact(inputPaths, cacheDir);
+    const stat = fs.statSync(prepared.filePath);
+    const token = base64url(crypto.randomBytes(24));
+    const expiresAtMs = Date.now() + FILE_SHARE_TTL_MS;
+    const downloadPath = `/api/remote/direct/files/${token}/${encodeURIComponent(prepared.name)}`;
+    const share = {
+      ...prepared,
+      token,
+      size: stat.size,
+      createdAtMs: Date.now(),
+      createdAt: new Date().toISOString(),
+      expiresAtMs,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      downloadPath,
+    };
+    this.fileShares.set(token, share);
+    this.emitState();
+    return { ok: true, share: this.publicShare(share, this.directBaseUrl()), state: this.info() };
   }
 
   pruneRemoteTurns() {
@@ -922,6 +1314,9 @@ class RemoteHost extends EventEmitter {
       if (req.method === 'OPTIONS') return json(res, 204, {});
       const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
       if (req.method === 'GET' && url.pathname === '/remote') return html(res, remotePageHtml());
+      if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/api/remote/direct/files/')) {
+        return this.handleFileDownload(req, res, url);
+      }
       if (req.method === 'GET' && url.pathname === '/vendor/tweetnacl.min.js') {
         const vendorPath = tweetNaclBrowserPath();
         if (!vendorPath) return notFound(res);
@@ -965,6 +1360,12 @@ class RemoteHost extends EventEmitter {
         const result = await this.handleEventsPayload(payload);
         return json(res, 200, await this.encryptedResponse(pairing, result));
       }
+      if (url.pathname === '/api/remote/direct/files') {
+        const body = await readBody(req);
+        const { pairing, payload } = this.decryptRequest(body);
+        const result = await this.handleFilesPayload(payload, url.origin);
+        return json(res, 200, await this.encryptedResponse(pairing, result));
+      }
       if (url.pathname === '/api/remote/direct/command') {
         const body = await readBody(req);
         const { pairing, payload } = this.decryptRequest(body);
@@ -975,6 +1376,60 @@ class RemoteHost extends EventEmitter {
     } catch (e) {
       json(res, 400, { ok: false, error: (e && e.message) || '远程请求失败' });
     }
+  }
+
+  handleFileDownload(req, res, url) {
+    this.pruneFileShares();
+    const parts = url.pathname.split('/').filter(Boolean);
+    const token = parts[4] || '';
+    const share = this.fileShares.get(token);
+    if (!share || Date.now() > share.expiresAtMs || !fs.existsSync(share.filePath)) {
+      return notFound(res);
+    }
+    const stat = fs.statSync(share.filePath);
+    const range = String(req.headers.range || '');
+    let start = 0;
+    let end = stat.size - 1;
+    let status = 200;
+    if (range.startsWith('bytes=')) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (match) {
+        if (match[1]) start = Number(match[1]);
+        if (match[2]) end = Number(match[2]);
+        if (!match[1] && match[2]) {
+          const tail = Number(match[2]);
+          start = Math.max(0, stat.size - tail);
+          end = stat.size - 1;
+        }
+        if (start <= end && start < stat.size) {
+          status = 206;
+          end = Math.min(end, stat.size - 1);
+        } else {
+          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+          res.end();
+          return;
+        }
+      }
+    }
+    const length = stat.size ? end - start + 1 : 0;
+    const headers = {
+      'Content-Type': contentTypeFor(share.name),
+      'Content-Length': length,
+      'Content-Disposition': contentDispositionAttachment(share.name),
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+    };
+    if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
+    res.writeHead(status, headers);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    if (!stat.size) {
+      res.end();
+      return;
+    }
+    fs.createReadStream(share.filePath, { start, end }).pipe(res);
   }
 
   handleUpgrade(req, socket) {
@@ -1165,6 +1620,14 @@ class RemoteHost extends EventEmitter {
     };
   }
 
+  async handleFilesPayload(payload, baseUrl) {
+    if (payload && payload.t && payload.t !== 'list_files') throw new Error('不支持的远程命令');
+    return {
+      t: 'files',
+      files: this.publicShares(baseUrl),
+    };
+  }
+
   info() {
     const urls = this.port ? networkUrls(this.port) : [];
     return {
@@ -1186,6 +1649,7 @@ class RemoteHost extends EventEmitter {
         rawPayloadText: this.pairing.rawPayloadText,
         qrDataUrl: this.pairing.qrDataUrl,
       } : null,
+      fileShares: this.publicShares(this.directBaseUrl()),
       lastError: this.lastError,
       inFlight: this.inFlight.size,
     };
@@ -1202,4 +1666,8 @@ module.exports = {
   encryptJson,
   networkUrls,
   stripThinkText,
+  PAIRING_TTL_MS,
+  FILE_SHARE_TTL_MS,
+  contentDispositionAttachment,
+  createZipArchive,
 };

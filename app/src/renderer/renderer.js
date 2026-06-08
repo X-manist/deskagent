@@ -20,6 +20,7 @@ const remoteMetaEl = $('#remoteMeta');
 const remoteQrEl = $('#remoteQr');
 const refreshRemoteBtn = $('#refreshRemote');
 const copyRemoteBtn = $('#copyRemote');
+const shareRemoteFileBtn = $('#shareRemoteFile');
 const urlModal = $('#urlModal');
 const urlInput = $('#urlInput');
 const urlErr = $('#urlErr');
@@ -54,6 +55,9 @@ let sessionsLoaded = false;
 let preparingSend = false;
 let activeConversationPromise = null;
 let remoteState = null;
+let remoteCountdownTimer = null;
+let remoteAutoRefreshTimer = null;
+let remoteAutoRefreshInFlight = false;
 let urlDownloading = false;
 let currentWorkspaceDir = '';
 let currentModel = '';
@@ -293,27 +297,46 @@ function activitySummary(kind, text) {
   return firstLine || '';
 }
 
+function isActivityRunning(phase) {
+  return phase === 'started' || phase === 'progress' || phase === 'delta';
+}
+
 function isCollapsedActivity(kind) {
   return kind === 'reasoning' || kind === 'tool' || kind === 'command';
 }
 
-function updateActivityEl(el, kind, text) {
+function setActivityClass(el, kind, running) {
+  if (!el) return;
+  const classes = ['activity'];
+  if (kind === 'file') classes.push('file');
+  if (kind === 'reasoning') classes.push('reasoning');
+  if (kind === 'tool') classes.push('tool');
+  if (kind === 'command') classes.push('command');
+  if (running) classes.push('running');
+  el.className = classes.join(' ');
+}
+
+function updateActivityEl(el, kind, text, running = false) {
   if (!el) return;
   const body = el._activityBody || el;
   body.textContent = text || '';
+  setActivityClass(el, kind, running);
   if (el._activitySummary) el._activitySummary.textContent = activitySummary(kind, text);
 }
 
-function makeActivityEl(kind, text) {
+function makeActivityEl(kind, text, running = false) {
   const el = document.createElement('div');
-  el.className = `activity ${kind === 'file' ? 'file' : kind === 'reasoning' ? 'reasoning' : kind === 'tool' ? 'tool' : kind === 'command' ? 'command' : ''}`;
+  setActivityClass(el, kind, running);
   if (isCollapsedActivity(kind)) {
     const details = document.createElement('details');
     const summary = document.createElement('summary');
     const body = document.createElement('div');
+    const spinner = document.createElement('span');
     const label = document.createElement('span');
+    spinner.className = 'activity-spinner';
     label.className = 'activity-label';
     label.textContent = activitySummary(kind, text);
+    summary.appendChild(spinner);
     summary.appendChild(label);
     body.className = 'activity-body';
     body.textContent = text || '';
@@ -336,7 +359,7 @@ function appendItemDom(item) {
     messagesEl.appendChild(wrap);
     if (item.itemId) activeBubbles.set(item.itemId, bubble);
   } else if (item.kind === 'activity') {
-    const el = makeActivityEl(item.activityKind, item.display);
+    const el = makeActivityEl(item.activityKind, item.display, !!item.running);
     messagesEl.appendChild(el);
     if (item.itemId) activeActivities.set(item.itemId, el._activityBody || el);
   }
@@ -359,7 +382,7 @@ function renderActive() {
       messagesEl.appendChild(wrap);
       if (item.itemId) activeBubbles.set(item.itemId, bubble);
     } else if (item.kind === 'activity') {
-      const el = makeActivityEl(item.activityKind, item.display);
+      const el = makeActivityEl(item.activityKind, item.display, !!item.running);
       messagesEl.appendChild(el);
       if (item.itemId) activeActivities.set(item.itemId, el._activityBody || el);
     }
@@ -559,10 +582,70 @@ function formatExpiresAt(value) {
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+function formatRemoteRemaining(value) {
+  if (!value) return '';
+  const expires = new Date(value).getTime();
+  if (!Number.isFinite(expires)) return '';
+  const ms = expires - Date.now();
+  if (ms <= 0) return '已过期';
+  const minutes = Math.ceil(ms / 60000);
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (hours >= 24) return '约 1 天';
+  if (hours > 0) return `约 ${hours} 小时 ${mins} 分钟`;
+  return `约 ${minutes} 分钟`;
+}
+
+function clearRemoteTimers() {
+  if (remoteCountdownTimer) clearInterval(remoteCountdownTimer);
+  if (remoteAutoRefreshTimer) clearTimeout(remoteAutoRefreshTimer);
+  remoteCountdownTimer = null;
+  remoteAutoRefreshTimer = null;
+}
+
+function updateRemoteMetaText() {
+  if (!remoteMetaEl || !remoteState || !remoteState.loggedIn || !remoteState.enabled) return;
+  const pairing = remoteState.pairing || {};
+  const exp = formatExpiresAt(pairing.expiresAt);
+  const remaining = formatRemoteRemaining(pairing.expiresAt);
+  if (remoteState.lastError) {
+    remoteMetaEl.textContent = remoteState.lastError;
+  } else if (exp && remaining) {
+    remoteMetaEl.textContent = `同一 Wi-Fi/VPN 下扫码连接，${exp} 过期（剩余 ${remaining}）`;
+  } else {
+    remoteMetaEl.textContent = '同一 Wi-Fi/VPN 下扫码连接这台电脑';
+  }
+}
+
+async function autoRefreshRemotePairing() {
+  if (remoteAutoRefreshInFlight || !window.api.remote || !window.api.remote.refreshPairing) return;
+  if (!remoteState || !remoteState.loggedIn) return;
+  remoteAutoRefreshInFlight = true;
+  try {
+    renderRemoteState(await window.api.remote.refreshPairing());
+  } catch (e) {
+    renderRemoteState({ ...(remoteState || {}), lastError: (e && e.message) || '自动刷新二维码失败' });
+  } finally {
+    remoteAutoRefreshInFlight = false;
+  }
+}
+
+function scheduleRemoteAutoRefresh() {
+  clearRemoteTimers();
+  if (!remoteState || !remoteState.loggedIn || !remoteState.enabled) return;
+  const expires = new Date(remoteState.pairing && remoteState.pairing.expiresAt).getTime();
+  if (!Number.isFinite(expires)) return;
+  remoteCountdownTimer = setInterval(updateRemoteMetaText, 60 * 1000);
+  const refreshIn = Math.max(1000, expires - Date.now() - 5 * 60 * 1000);
+  remoteAutoRefreshTimer = setTimeout(autoRefreshRemotePairing, refreshIn);
+  updateRemoteMetaText();
+}
+
 function renderRemoteState(state) {
   remoteState = state || {};
   if (!remoteStateNote || !remoteCodeEl || !remoteMetaEl) return;
   if (!remoteState.loggedIn) {
+    clearRemoteTimers();
     remoteStateNote.textContent = '待登录';
     remoteCodeEl.textContent = '--------';
     remoteMetaEl.textContent = '登录后可生成本机直连二维码';
@@ -572,9 +655,11 @@ function renderRemoteState(state) {
     }
     if (refreshRemoteBtn) refreshRemoteBtn.disabled = true;
     if (copyRemoteBtn) copyRemoteBtn.disabled = true;
+    if (shareRemoteFileBtn) shareRemoteFileBtn.disabled = true;
     return;
   }
   if (!remoteState.enabled) {
+    clearRemoteTimers();
     remoteStateNote.textContent = remoteState.lastError ? '异常' : '未连接';
     remoteCodeEl.textContent = '--------';
     remoteMetaEl.textContent = remoteState.lastError || '正在开启本机加密直连';
@@ -584,6 +669,7 @@ function renderRemoteState(state) {
     }
     if (refreshRemoteBtn) refreshRemoteBtn.disabled = false;
     if (copyRemoteBtn) copyRemoteBtn.disabled = true;
+    if (shareRemoteFileBtn) shareRemoteFileBtn.disabled = true;
     return;
   }
   const pairing = remoteState.pairing || {};
@@ -604,6 +690,8 @@ function renderRemoteState(state) {
     : '同一 Wi-Fi/VPN 下扫码连接这台电脑');
   if (refreshRemoteBtn) refreshRemoteBtn.disabled = false;
   if (copyRemoteBtn) copyRemoteBtn.disabled = !pairing.qrText;
+  if (shareRemoteFileBtn) shareRemoteFileBtn.disabled = false;
+  scheduleRemoteAutoRefresh();
 }
 
 function attachIcon(kind) {
@@ -871,7 +959,6 @@ window.addEventListener('drop', (e) => {
     .catch((error) => showSendFailure((error && error.message) || '附件导入失败', activeConv()));
 });
 
-$('#openWorkspace').addEventListener('click', () => window.api.openWorkspace());
 if (mountWorkspaceBtn) {
   mountWorkspaceBtn.addEventListener('click', async () => {
     mountWorkspaceBtn.disabled = true;
@@ -947,6 +1034,28 @@ if (copyRemoteBtn) {
   });
 }
 
+if (shareRemoteFileBtn) {
+  shareRemoteFileBtn.addEventListener('click', async () => {
+    shareRemoteFileBtn.disabled = true;
+    const old = shareRemoteFileBtn.textContent;
+    shareRemoteFileBtn.textContent = '选择中';
+    try {
+      const result = await window.api.remote.shareFiles();
+      if (result && result.canceled) return;
+      if (result && result.state) renderRemoteState(result.state);
+      const share = result && result.share;
+      if (share) {
+        showSystemNotice(`已生成手机文件下载链接：${share.name}`);
+      }
+    } catch (e) {
+      showSystemNotice((e && e.message) || '发送文件失败');
+    } finally {
+      shareRemoteFileBtn.textContent = old;
+      shareRemoteFileBtn.disabled = !(remoteState && remoteState.loggedIn && remoteState.enabled);
+    }
+  });
+}
+
 // Settings modal
 const modal = $('#settingsModal');
 $('#openSettings').addEventListener('click', () => {
@@ -1008,22 +1117,25 @@ window.api.on('chat:activity', (p) => {
   const fallbackId = p.itemId || `${p.kind}:${conv.items.length}`;
   let item = conv.items.find((it) => it.kind === 'activity' && it.itemId === fallbackId);
   const display = activityDisplay(p);
+  const running = isActivityRunning(p.phase);
   if (!item) {
     item = {
       kind: 'activity',
       activityKind: p.kind,
       display,
       itemId: fallbackId,
+      running,
     };
     pushItem(conv, item);
     return;
   }
   if (display || p.phase === 'completed') item.display = display;
+  item.running = running;
   if (conv.id === activeId) {
     const body = activeActivities.get(fallbackId);
     if (body) {
       const el = body.closest ? body.closest('.activity') : body;
-      updateActivityEl(el || body, item.activityKind, item.display);
+      updateActivityEl(el || body, item.activityKind, item.display, item.running);
       scrollToBottom();
     } else {
       renderActive();
@@ -1047,6 +1159,7 @@ window.api.on('chat:turnDone', (p) => {
     if (conv.id === activeId) updateComposer();
   }
   refreshSessions();
+  refreshAccountBadge().catch(() => {});
 });
 
 window.api.on('chat:error', (p) => {
@@ -1056,6 +1169,7 @@ window.api.on('chat:error', (p) => {
   pushItem(conv, { kind: 'activity', activityKind: '', display: '错误：' + (p.message || '错误') });
   if (conv.id === activeId) updateComposer();
   maybeQuotaPrompt(p && p.message);
+  refreshAccountBadge().catch(() => {});
 });
 
 window.api.on('chat:threadChanged', (p) => {
@@ -1113,6 +1227,9 @@ const accountModal = $('#accountModal');
 const memberEl = $('#member');
 let loggedIn = false;
 let codeTimer = null;
+let accountBadgeTimer = null;
+let accountModalTimer = null;
+let accountRefreshPromise = null;
 
 const EN_PACKAGE_NAMES = new Map([
   ['月度会员', 'Monthly Plan'],
@@ -1183,15 +1300,26 @@ function setLoggedIn(state) {
       memberEl.textContent = `${t('账户', 'Account')}: ${state.phone || t('已登录', 'Signed in')}`;
       memberEl.style.cursor = 'pointer';
     }
+    startAccountBadgePolling();
     refreshAccountBadge();
   } else {
+    stopAccountBadgePolling();
+    stopAccountModalPolling();
     loginOverlay.classList.remove('hidden');
     if (memberEl) memberEl.textContent = `${t('会员', 'Membership')}: ${t('未登录', 'Signed out')}`;
   }
 }
 
 async function refreshAccountBadge() {
-  try {
+  if (!loggedIn) return null;
+  if (accountRefreshPromise) {
+    try {
+      return await accountRefreshPromise;
+    } catch (_) {
+      return null;
+    }
+  }
+  accountRefreshPromise = (async () => {
     const me = await window.api.auth.me();
     if (Array.isArray(me.allowed_models)) {
       availableModels = me.allowed_models;
@@ -1199,9 +1327,45 @@ async function refreshAccountBadge() {
     }
     const ent = Number(me.points_remaining || 0);
     if (memberEl) {
-      memberEl.textContent = `${t('积分', 'Credits')}: ${t('剩余', 'remaining')} ${ent.toLocaleString()}`;
+      memberEl.textContent = `${t('积分', 'Credits')}: ${t('剩余', 'remaining')} ${Math.round(ent).toLocaleString()}`;
     }
-  } catch (_) {}
+    return me;
+  })().finally(() => {
+    accountRefreshPromise = null;
+  });
+  try {
+    return await accountRefreshPromise;
+  } catch (_) {
+    return null;
+  }
+}
+
+function startAccountBadgePolling() {
+  if (accountBadgeTimer) clearInterval(accountBadgeTimer);
+  accountBadgeTimer = setInterval(() => {
+    refreshAccountBadge().catch(() => {});
+  }, 30000);
+}
+
+function stopAccountBadgePolling() {
+  if (accountBadgeTimer) clearInterval(accountBadgeTimer);
+  accountBadgeTimer = null;
+}
+
+function startAccountModalPolling() {
+  stopAccountModalPolling();
+  accountModalTimer = setInterval(() => {
+    if (!accountModal || accountModal.classList.contains('hidden')) {
+      stopAccountModalPolling();
+      return;
+    }
+    renderAccountPanel().catch(() => {});
+  }, 8000);
+}
+
+function stopAccountModalPolling() {
+  if (accountModalTimer) clearInterval(accountModalTimer);
+  accountModalTimer = null;
 }
 
 function maybeQuotaPrompt(message) {
@@ -1288,6 +1452,11 @@ loginBtn.addEventListener('click', async () => {
 async function openAccount() {
   if (!loggedIn) return;
   accountModal.classList.remove('hidden');
+  await renderAccountPanel();
+  startAccountModalPolling();
+}
+
+async function renderAccountPanel() {
   const titleEl = accountModal.querySelector('h2');
   const sectionEl = accountModal.querySelector('.section-title');
   const logoutEl = $('#logoutBtn');
@@ -1300,21 +1469,20 @@ async function openAccount() {
   if (logoutEl) logoutEl.textContent = t('退出登录', 'Sign out');
   if (closeEl) closeEl.textContent = t('关闭', 'Close');
   errEl.textContent = '';
-  infoEl.textContent = t('加载中…', 'Loading...');
-  listEl.innerHTML = '';
+  if (!infoEl.innerHTML.trim()) infoEl.textContent = t('加载中…', 'Loading...');
   try {
-    const me = await window.api.auth.me();
+    const me = await refreshAccountBadge() || await window.api.auth.me();
     if (Array.isArray(me.allowed_models)) {
       availableModels = me.allowed_models;
       renderModelSelect();
     }
     const ents = me.entitlements || [];
     let html = `<div>${t('手机号', 'Phone')}: ${escapeHtml(me.phone)}</div>`;
-    html += `<div>${t('积分余额', 'Credits')}: ${Number(me.points_remaining || 0).toLocaleString()}</div>`;
+    html += `<div>${t('积分余额', 'Credits')}: ${Math.round(Number(me.points_remaining || 0)).toLocaleString()}</div>`;
     if (ents.length) {
       ents.forEach((e) => {
-        const remaining = Number(e.points_remaining || e.tokens_remaining || 0);
-        const total = Number(e.points || e.token_allowance || 0);
+        const remaining = Math.round(Number(e.points_remaining || e.tokens_remaining || 0));
+        const total = Math.round(Number(e.points || e.token_allowance || 0));
         const pct = total ? Math.max(0, Math.min(100, (remaining / total) * 100)) : 0;
         const models = Array.isArray(e.models) && e.models.length ? e.models.join(', ') : e.model;
         html += `<div style="margin-top:8px">${t('套餐', 'Plan')} (${escapeHtml(models)}): ${t('剩余', 'remaining')} ${remaining.toLocaleString()} / ${total.toLocaleString()} ${t('积分', 'points')} (${t('至', 'until')} ${escapeHtml(e.expires_at)})`;
@@ -1325,19 +1493,22 @@ async function openAccount() {
     }
     infoEl.innerHTML = html;
 
-    const { packages } = await window.api.auth.packages();
-    (packages || []).forEach((p) => {
-      const row = document.createElement('div');
-      row.className = 'pkg';
-      const models = Array.isArray(p.models) && p.models.length ? p.models.join(', ') : p.model;
-      const points = Number(p.points || p.total_tokens || 0);
-      row.innerHTML = `<div><div class="pkg-name">${escapeHtml(packageDisplayName(p))}</div>` +
-        `<div class="pkg-meta">${escapeHtml(models)} · ${points.toLocaleString()} ${t('积分', 'points')} · ${p.duration_days} ${t('天', 'days')}</div></div>` +
-        `<div style="display:flex;align-items:center;gap:10px"><span class="pkg-price">¥${p.price_yuan}</span>` +
-        `<button class="send-btn">${t('购买', 'Buy')}</button></div>`;
-      row.querySelector('button').addEventListener('click', () => buyPackage(p, errEl));
-      listEl.appendChild(row);
-    });
+    if (!listEl.children.length) {
+      listEl.innerHTML = '';
+      const { packages } = await window.api.auth.packages();
+      (packages || []).forEach((p) => {
+        const row = document.createElement('div');
+        row.className = 'pkg';
+        const models = Array.isArray(p.models) && p.models.length ? p.models.join(', ') : p.model;
+        const points = Number(p.points || p.total_tokens || 0);
+        row.innerHTML = `<div><div class="pkg-name">${escapeHtml(packageDisplayName(p))}</div>` +
+          `<div class="pkg-meta">${escapeHtml(models)} · ${points.toLocaleString()} ${t('积分', 'points')} · ${p.duration_days} ${t('天', 'days')}</div></div>` +
+          `<div style="display:flex;align-items:center;gap:10px"><span class="pkg-price">¥${p.price_yuan}</span>` +
+          `<button class="send-btn">${t('购买', 'Buy')}</button></div>`;
+        row.querySelector('button').addEventListener('click', () => buyPackage(p, errEl));
+        listEl.appendChild(row);
+      });
+    }
   } catch (e) {
     infoEl.textContent = '';
     errEl.textContent = e && e.message ? e.message : t('加载失败', 'Failed to load');
@@ -1357,16 +1528,21 @@ async function buyPackage(p, errEl) {
         : t('订单已创建，完成支付后自动到账。', 'Order created. Complete payment and the plan will activate automatically.');
     }
     await refreshAccountBadge();
+    if (!accountModal.classList.contains('hidden')) await renderAccountPanel();
   } catch (e) {
     errEl.textContent = e && e.message ? e.message : t('购买失败', 'Purchase failed');
   }
 }
 
 if (memberEl) memberEl.addEventListener('click', openAccount);
-$('#closeAccount').addEventListener('click', () => accountModal.classList.add('hidden'));
+$('#closeAccount').addEventListener('click', () => {
+  accountModal.classList.add('hidden');
+  stopAccountModalPolling();
+});
 $('#logoutBtn').addEventListener('click', async () => {
   await window.api.auth.logout();
   accountModal.classList.add('hidden');
+  stopAccountModalPolling();
   setLoggedIn({ loggedIn: false });
 });
 

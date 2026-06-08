@@ -18,7 +18,6 @@ contextBridge.exposeInMainWorld('api', {
   listSessions: () => ipcRenderer.invoke('chat:listSessions'),
   newSession: () => ipcRenderer.invoke('chat:newSession'),
   resumeSession: (threadId) => ipcRenderer.invoke('chat:resumeSession', threadId),
-  openWorkspace: () => ipcRenderer.invoke('app:openWorkspace'),
   mountWorkspace: () => ipcRenderer.invoke('app:mountWorkspace'),
   createWorkspaceCheckpoint: (label) => ipcRenderer.invoke('app:createWorkspaceCheckpoint', label),
   rollbackWorkspace: () => ipcRenderer.invoke('app:rollbackWorkspace'),
@@ -30,6 +29,7 @@ contextBridge.exposeInMainWorld('api', {
   remote: {
     status: () => ipcRenderer.invoke('remote:status'),
     refreshPairing: () => ipcRenderer.invoke('remote:refreshPairing'),
+    shareFiles: () => ipcRenderer.invoke('remote:shareFiles'),
   },
   auth: {
     status: () => ipcRenderer.invoke('auth:status'),

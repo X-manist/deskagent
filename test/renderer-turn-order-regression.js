@@ -64,12 +64,15 @@ this.helpers = {
 const { helpers, source: rendererSource } = rendererHelpers();
 
 const toolDisplay = '正在调用工具\nmcp.read_file\n结果：{"ok":true}';
-const toolEl = helpers.makeActivityEl('tool', toolDisplay);
+const toolEl = helpers.makeActivityEl('tool', toolDisplay, true);
 assert.strictEqual(toolEl.children[0].tagName, 'details', 'tool activity uses collapsed details');
 assert.strictEqual(toolEl._activitySummary.textContent, '正在调用工具');
 assert.strictEqual(toolEl._activityBody.textContent, toolDisplay);
-helpers.updateActivityEl(toolEl, 'tool', '工具调用完成\nmcp.read_file');
+assert(String(toolEl.className).includes('running'), 'running tool activity exposes spinner state');
+assert.strictEqual(toolEl.children[0].children[0].children[0].className, 'activity-spinner', 'tool activity has spinner element');
+helpers.updateActivityEl(toolEl, 'tool', '工具调用完成\nmcp.read_file', false);
 assert.strictEqual(toolEl._activitySummary.textContent, '工具调用完成');
+assert(!String(toolEl.className).includes('running'), 'completed tool activity clears spinner state');
 
 const commandEl = helpers.makeActivityEl('command', '正在执行命令\nnpm test');
 assert.strictEqual(commandEl.children[0].tagName, 'details', 'command activity uses collapsed details');

@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -753,11 +753,6 @@ ipcMain.handle('chat:resumeSession', async (_e, threadId) => {
   return { ok: true, ...result };
 });
 
-ipcMain.handle('app:openWorkspace', async () => {
-  shell.openPath(paths.workspaceDir);
-  return { ok: true };
-});
-
 ipcMain.handle('app:mountWorkspace', async () => {
   const { dialog } = require('electron');
   const result = await dialog.showOpenDialog(win, {
@@ -793,6 +788,22 @@ ipcMain.handle('remote:refreshPairing', async () => {
   if (!isLoggedIn()) throw new Error('请先登录后再开启远程连接');
   if (!remoteHost.running) await startRemoteHost();
   return remoteHost.refreshPairing();
+});
+
+ipcMain.handle('remote:shareFiles', async () => {
+  if (!remoteHost) throw new Error('远程连接服务未初始化');
+  if (!isLoggedIn()) throw new Error('请先登录后再发送文件');
+  if (!remoteHost.running) await startRemoteHost();
+  const { dialog } = require('electron');
+  const result = await dialog.showOpenDialog(win, {
+    properties: ['openFile', 'multiSelections'],
+    title: '选择要发送到手机的文件',
+    message: '单个大文件会通过局域网直连下载；多个文件会打包为 zip。',
+  });
+  if (result.canceled || !result.filePaths || !result.filePaths.length) {
+    return { canceled: true, state: remoteHost.info() };
+  }
+  return remoteHost.sharePaths(result.filePaths);
 });
 
 app.whenReady().then(async () => {
