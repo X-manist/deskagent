@@ -70,12 +70,20 @@ Browser 插件的 in-app browser 当前不可用，Playwright MCP 默认 profile
 - `artifacts/remote-relay-e2e/04-small2u8g-mobile-connected.png`
 - `artifacts/remote-relay-e2e/05-small2u8g-mobile-sent-waiting.png`
 - `artifacts/remote-relay-e2e/06-small2u8g-mobile-completed-files.png`
+- `artifacts/remote-relay-e2e/07-explicit-send-empty-files.png`
+- `artifacts/remote-relay-e2e/08-explicit-send-file-link.png`
 
 截图覆盖：
 
 - 手机远程页通过公网 relay code 连接。
 - 手机发送任务后进入等待桌面端处理状态。
 - 命令完成后显示回复；桌面端或 agent 显式发送文件后，手机端显示可下载文件列表。
+- 本地 direct remote 页面在显式发送前显示空文件区，调用 `RemoteHost.sharePaths()` 后刷新出 `phone-explicit-send-demo.txt` 下载链接。
+- 已通过下载链接读取文件内容，结果为 `hello explicit phone transfer`。
+
+新增显式发送证据：
+
+- `artifacts/remote-relay-e2e/explicit-send-visual-e2e.json`
 
 ## small2U8G 验证
 
