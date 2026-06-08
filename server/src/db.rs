@@ -84,7 +84,126 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    ensure_column(pool, "remote_pairings", "relay_session_id", "TEXT").await?;
+    ensure_column(pool, "remote_commands", "relay_session_id", "TEXT").await?;
+    ensure_remote_relay_tables(pool).await?;
     backfill_points(pool).await?;
+    Ok(())
+}
+
+async fn ensure_remote_relay_tables(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS remote_relay_sessions (
+          id              TEXT PRIMARY KEY,
+          code            TEXT NOT NULL UNIQUE,
+          user_id         INTEGER NOT NULL REFERENCES users(id),
+          machine_id      TEXT NOT NULL REFERENCES remote_machines(id),
+          client_key      TEXT NOT NULL,
+          machine_key     TEXT NOT NULL,
+          direct_url      TEXT,
+          direct_urls_json TEXT NOT NULL DEFAULT '[]',
+          status          TEXT NOT NULL DEFAULT 'pending',
+          created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+          expires_at      TEXT NOT NULL,
+          connected_at    TEXT,
+          last_client_at  TEXT,
+          last_machine_at TEXT,
+          revoked_at      TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_remote_relay_sessions_machine
+         ON remote_relay_sessions(machine_id, status, expires_at)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_remote_relay_sessions_user
+         ON remote_relay_sessions(user_id, created_at)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS remote_relay_messages (
+          id           TEXT PRIMARY KEY,
+          session_id   TEXT NOT NULL REFERENCES remote_relay_sessions(id),
+          user_id      INTEGER NOT NULL REFERENCES users(id),
+          machine_id   TEXT NOT NULL REFERENCES remote_machines(id),
+          direction    TEXT NOT NULL,
+          kind         TEXT NOT NULL DEFAULT 'message',
+          request_id   TEXT,
+          payload_json TEXT NOT NULL,
+          status       TEXT NOT NULL DEFAULT 'pending',
+          created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+          claimed_at   TEXT,
+          finished_at  TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_remote_relay_messages_poll
+         ON remote_relay_messages(machine_id, direction, status, created_at)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_remote_relay_messages_session
+         ON remote_relay_messages(session_id, direction, created_at)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS remote_relay_files (
+          id             TEXT PRIMARY KEY,
+          session_id     TEXT NOT NULL REFERENCES remote_relay_sessions(id),
+          user_id        INTEGER NOT NULL REFERENCES users(id),
+          machine_id     TEXT NOT NULL REFERENCES remote_machines(id),
+          name           TEXT NOT NULL,
+          content_type   TEXT NOT NULL,
+          size           INTEGER NOT NULL,
+          content        BLOB NOT NULL,
+          created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+          expires_at     TEXT NOT NULL,
+          downloaded_at  TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_remote_relay_files_session
+         ON remote_relay_files(session_id, created_at)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS remote_files (
+          id             TEXT PRIMARY KEY,
+          user_id        INTEGER NOT NULL REFERENCES users(id),
+          machine_id     TEXT NOT NULL REFERENCES remote_machines(id),
+          name           TEXT NOT NULL,
+          content_type   TEXT NOT NULL,
+          size           INTEGER NOT NULL,
+          content        BLOB,
+          direct_url     TEXT,
+          packaged       INTEGER NOT NULL DEFAULT 0,
+          source_count   INTEGER NOT NULL DEFAULT 1,
+          entry_count    INTEGER NOT NULL DEFAULT 1,
+          created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+          expires_at     TEXT NOT NULL,
+          downloaded_at  TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_remote_files_machine
+         ON remote_files(user_id, machine_id, created_at)",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

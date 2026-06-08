@@ -608,12 +608,13 @@ function updateRemoteMetaText() {
   const pairing = remoteState.pairing || {};
   const exp = formatExpiresAt(pairing.expiresAt);
   const remaining = formatRemoteRemaining(pairing.expiresAt);
+  const mode = pairing.payload && pairing.payload.mode === 'relay-encrypted' ? '公网中继扫码连接' : '局域网直连扫码连接';
   if (remoteState.lastError) {
     remoteMetaEl.textContent = remoteState.lastError;
   } else if (exp && remaining) {
-    remoteMetaEl.textContent = `同一 Wi-Fi/VPN 下扫码连接，${exp} 过期（剩余 ${remaining}）`;
+    remoteMetaEl.textContent = `${mode}，${exp} 过期（剩余 ${remaining}）`;
   } else {
-    remoteMetaEl.textContent = '同一 Wi-Fi/VPN 下扫码连接这台电脑';
+    remoteMetaEl.textContent = mode;
   }
 }
 
@@ -648,7 +649,7 @@ function renderRemoteState(state) {
     clearRemoteTimers();
     remoteStateNote.textContent = '待登录';
     remoteCodeEl.textContent = '--------';
-    remoteMetaEl.textContent = '登录后可生成本机直连二维码';
+    remoteMetaEl.textContent = '登录后可生成公网远程二维码';
     if (remoteQrEl) {
       remoteQrEl.removeAttribute('src');
       remoteQrEl.classList.add('hidden');
@@ -662,7 +663,7 @@ function renderRemoteState(state) {
     clearRemoteTimers();
     remoteStateNote.textContent = remoteState.lastError ? '异常' : '未连接';
     remoteCodeEl.textContent = '--------';
-    remoteMetaEl.textContent = remoteState.lastError || '正在开启本机加密直连';
+    remoteMetaEl.textContent = remoteState.lastError || '正在开启远程连接';
     if (remoteQrEl) {
       remoteQrEl.removeAttribute('src');
       remoteQrEl.classList.add('hidden');
@@ -673,7 +674,8 @@ function renderRemoteState(state) {
     return;
   }
   const pairing = remoteState.pairing || {};
-  remoteStateNote.textContent = remoteState.lastError ? '异常' : '本机直连';
+  const isRelay = pairing.payload && pairing.payload.mode === 'relay-encrypted';
+  remoteStateNote.textContent = remoteState.lastError ? '异常' : (isRelay ? '公网中继' : '局域网直连');
   remoteCodeEl.textContent = pairing.code || '--------';
   if (remoteQrEl) {
     if (pairing.qrDataUrl) {
@@ -685,9 +687,10 @@ function renderRemoteState(state) {
     }
   }
   const exp = formatExpiresAt(pairing.expiresAt);
+  const mode = isRelay ? '公网中继扫码连接' : '局域网直连扫码连接';
   remoteMetaEl.textContent = remoteState.lastError || (exp
-    ? `同一 Wi-Fi/VPN 下扫码连接，${exp} 过期`
-    : '同一 Wi-Fi/VPN 下扫码连接这台电脑');
+    ? `${mode}，${exp} 过期`
+    : mode);
   if (refreshRemoteBtn) refreshRemoteBtn.disabled = false;
   if (copyRemoteBtn) copyRemoteBtn.disabled = !pairing.qrText;
   if (shareRemoteFileBtn) shareRemoteFileBtn.disabled = false;

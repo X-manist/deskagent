@@ -87,6 +87,26 @@ const tools = [
     run: (args) => call('POST', '/desktop/screenshot', args),
   },
   {
+    name: 'deskagent_send_file_to_phone',
+    description: '当用户明确要求把本机或工作区文件发送到远程手机端时调用，生成手机端可点击下载链接。不要在用户未要求时发送所有产物。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '要发送的单个文件或目录路径；相对路径按当前工作目录解析。' },
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '要发送的多个文件或目录路径；多个条目会打包成 zip。',
+        },
+      },
+      anyOf: [
+        { required: ['path'] },
+        { required: ['paths'] },
+      ],
+    },
+    run: (args) => call('POST', '/remote/share-file', args),
+  },
+  {
     name: 'deskagent_send_email',
     description: '通过 SMTP 发邮件。正式版由会员账号自动配置；开发版可用 SMTP_* 环境变量配置。',
     inputSchema: {

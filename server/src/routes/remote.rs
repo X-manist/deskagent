@@ -1,9 +1,11 @@
+use axum::body::Body;
 use axum::extract::Query;
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
-use axum::response::Html;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{Html, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine;
 use chrono::{Duration, Utc};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,8 @@ use crate::state::AppState;
 
 const MACHINE_TOKEN_PREFIX: &str = "da_machine_";
 const MAX_REMOTE_COMMANDS_PER_POLL: i64 = 8;
+const RELAY_PAIRING_TTL_HOURS: i64 = 24;
+const RELAY_SESSION_TTL_DAYS: i64 = 30;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -33,6 +37,10 @@ pub fn router() -> Router<AppState> {
             get(list_commands).post(create_command),
         )
         .route(
+            "/api/remote/machines/{machine_id}/files",
+            get(list_remote_files),
+        )
+        .route(
             "/api/remote/pairings/{code}",
             get(read_pairing).post(consume_pairing),
         )
@@ -41,6 +49,27 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/remote/machine/commands/{command_id}/result",
             post(machine_command_result),
+        )
+        .route(
+            "/api/remote/relay/pairings/{code}",
+            post(connect_relay_pairing),
+        )
+        .route(
+            "/api/remote/relay/sessions/{session_id}/commands",
+            get(list_relay_commands).post(create_relay_command),
+        )
+        .route(
+            "/api/remote/relay/sessions/{session_id}/files",
+            get(list_relay_files),
+        )
+        .route("/api/remote/machine/files", post(machine_upload_file))
+        .route(
+            "/api/remote/files/{file_id}/{name}",
+            get(download_relay_file),
+        )
+        .route(
+            "/api/remote/files/{file_id}",
+            get(download_relay_file_plain),
         )
         .route("/remote", get(remote_web_page))
 }
@@ -240,6 +269,16 @@ struct CreatePairingReq {
     app_url: Option<String>,
     #[serde(default)]
     web_url: Option<String>,
+    #[serde(default)]
+    direct_url: Option<String>,
+    #[serde(default)]
+    direct_urls: Vec<String>,
+    #[serde(default)]
+    client_key: Option<String>,
+    #[serde(default)]
+    machine_key: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 fn public_server_url(headers: &HeaderMap) -> String {
@@ -258,7 +297,97 @@ fn public_server_url(headers: &HeaderMap) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("127.0.0.1:8787");
-    format!("{scheme}://{host}")
+    let prefix = forwarded_prefix(headers);
+    format!("{scheme}://{host}{prefix}")
+}
+
+fn forwarded_prefix(headers: &HeaderMap) -> String {
+    let Some(raw) = headers
+        .get("x-forwarded-prefix")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && *v != "/")
+    else {
+        return String::new();
+    };
+    if raw.contains("://") || raw.contains('?') || raw.contains('#') || raw.contains('\\') {
+        return String::new();
+    }
+    let segments = raw
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", segments.join("/"))
+    }
+}
+
+fn public_path(headers: &HeaderMap, path: &str) -> String {
+    format!("{}{}", forwarded_prefix(headers), path)
+}
+
+fn random_relay_key() -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::thread_rng().gen::<[u8; 32]>())
+}
+
+fn truncate_utf8(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn content_type_for_name(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".zip") {
+        "application/zip"
+    } else if lower.ends_with(".pdf") {
+        "application/pdf"
+    } else if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".txt") || lower.ends_with(".md") || lower.ends_with(".csv") {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+fn ascii_filename_fallback(name: &str) -> String {
+    let cleaned = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_graphic() || ch == ' ' {
+                match ch {
+                    '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                    _ => ch,
+                }
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "download".to_string()
+    } else {
+        truncate_utf8(trimmed, 180)
+    }
+}
+
+fn content_disposition_attachment(name: &str) -> String {
+    let fallback = ascii_filename_fallback(name).replace(['"', '\\'], "_");
+    format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        fallback,
+        urlencoding::encode(name)
+    )
 }
 
 async fn create_pairing(
@@ -297,28 +426,56 @@ async fn create_pairing(
         picked.ok_or_else(|| AppError::internal("无法生成连接码"))?
     };
     let pairing_id = crypto::new_uuid();
-    let expires_at = (Utc::now() + Duration::minutes(10)).to_rfc3339();
+    let expires_at = (Utc::now() + Duration::hours(RELAY_PAIRING_TTL_HOURS)).to_rfc3339();
+    let relay_expires_at = (Utc::now() + Duration::days(RELAY_SESSION_TTL_DAYS)).to_rfc3339();
+    let relay_session_id = crypto::new_uuid();
+    let client_key = req
+        .client_key
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(random_relay_key);
+    let machine_key = req
+        .machine_key
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(random_relay_key);
+    let direct_urls = req
+        .direct_urls
+        .into_iter()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .collect::<Vec<_>>();
+    let direct_url = req
+        .direct_url
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| direct_urls.first().cloned());
+    let direct_urls_json = serde_json::to_string(&direct_urls).unwrap_or_else(|_| "[]".to_string());
     let app_url = req
         .app_url
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| format!("deskagent://connect?code={code}"));
+    let server_url = public_server_url(&headers);
     let web_url = req
         .web_url
         .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| format!("{}/remote?code={code}", public_server_url(&headers)));
+        .unwrap_or_else(|| format!("{server_url}/remote?code={code}#k={client_key}"));
     let payload = json!({
-        "version": 1,
+        "version": 3,
         "product": "deskagent",
+        "mode": req.mode.as_deref().unwrap_or("relay-encrypted"),
         "code": code,
         "machine_id": machine_id,
-        "server_url": public_server_url(&headers),
+        "relay_session_id": relay_session_id,
+        "server_url": server_url,
         "app_url": app_url,
         "web_url": web_url,
+        "direct_url": direct_url,
+        "direct_urls": direct_urls,
+        "crypto": "xsalsa20-poly1305",
+        "client_key": client_key,
     });
 
     sqlx::query(
-        "INSERT INTO remote_pairings (id, code, user_id, machine_id, payload_json, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO remote_pairings (id, code, user_id, machine_id, payload_json, expires_at, relay_session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&pairing_id)
     .bind(&code)
@@ -326,13 +483,34 @@ async fn create_pairing(
     .bind(&machine_id)
     .bind(payload.to_string())
     .bind(&expires_at)
+    .bind(&relay_session_id)
+    .execute(&st.db)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO remote_relay_sessions
+          (id, code, user_id, machine_id, client_key, machine_key, direct_url, direct_urls_json, status, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+    )
+    .bind(&relay_session_id)
+    .bind(&code)
+    .bind(user.0.sub)
+    .bind(&machine_id)
+    .bind(&client_key)
+    .bind(&machine_key)
+    .bind(direct_url.as_deref())
+    .bind(&direct_urls_json)
+    .bind(&relay_expires_at)
     .execute(&st.db)
     .await?;
 
     Ok(Json(json!({
         "pairing_id": pairing_id,
+        "relay_session_id": relay_session_id,
         "code": code,
         "expires_at": expires_at,
+        "relay_expires_at": relay_expires_at,
+        "machine_key": machine_key,
         "payload": payload,
     })))
 }
@@ -592,13 +770,432 @@ async fn machine_command_result(
 }
 
 #[derive(Deserialize)]
+struct UploadRemoteFileReq {
+    name: String,
+    size: i64,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    content_base64: Option<String>,
+    #[serde(default)]
+    direct_url: Option<String>,
+    #[serde(default)]
+    packaged: bool,
+    #[serde(default)]
+    source_count: Option<i64>,
+    #[serde(default)]
+    entry_count: Option<i64>,
+    #[serde(default)]
+    expires_at: Option<String>,
+}
+
+async fn machine_upload_file(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UploadRemoteFileReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let (machine_id, user_id) = auth_machine(&st, &headers).await?;
+    let name = truncate_utf8(req.name.trim(), 180);
+    if name.is_empty() {
+        return Err(AppError::bad("文件名不能为空"));
+    }
+    if req.size < 0 {
+        return Err(AppError::bad("文件大小无效"));
+    }
+    let direct_url = req
+        .direct_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let content = match req
+        .content_base64
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(raw) => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(raw)
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw))
+                .map_err(|_| AppError::bad("文件内容不是合法 base64"))?;
+            if decoded.len() > st.cfg.remote_relay_file_max_bytes {
+                return Err(AppError::bad(format!(
+                    "公网中继文件不能超过 {} 字节，请使用局域网直链",
+                    st.cfg.remote_relay_file_max_bytes
+                )));
+            }
+            if req.size > 0 && decoded.len() as i64 != req.size {
+                return Err(AppError::bad("文件大小与内容长度不一致"));
+            }
+            Some(decoded)
+        }
+        None => None,
+    };
+    if content.is_none() && direct_url.is_none() {
+        return Err(AppError::bad("缺少文件内容或局域网下载链接"));
+    }
+    let size = content
+        .as_ref()
+        .map(|bytes| bytes.len() as i64)
+        .unwrap_or(req.size);
+    let file_id = crypto::new_uuid();
+    let expires_at = req
+        .expires_at
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| (Utc::now() + Duration::hours(RELAY_PAIRING_TTL_HOURS)).to_rfc3339());
+    let content_type = req
+        .content_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| content_type_for_name(&name).to_string());
+    sqlx::query(
+        "INSERT INTO remote_files
+          (id, user_id, machine_id, name, content_type, size, content, direct_url, packaged, source_count, entry_count, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&file_id)
+    .bind(user_id)
+    .bind(&machine_id)
+    .bind(&name)
+    .bind(&content_type)
+    .bind(size)
+    .bind(content)
+    .bind(direct_url.as_deref())
+    .bind(if req.packaged { 1 } else { 0 })
+    .bind(req.source_count.unwrap_or(1).max(1))
+    .bind(req.entry_count.unwrap_or(1).max(1))
+    .bind(&expires_at)
+    .execute(&st.db)
+    .await?;
+    Ok(Json(json!({
+        "ok": true,
+        "file": {
+            "id": file_id,
+            "name": name,
+            "size": size,
+            "content_type": content_type,
+            "expires_at": expires_at,
+            "direct_url": direct_url,
+        }
+    })))
+}
+
+async fn list_remote_files(
+    headers: HeaderMap,
+    State(st): State<AppState>,
+    user: AuthUser,
+    Path(machine_id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM remote_machines WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+    )
+    .bind(&machine_id)
+    .bind(user.0.sub)
+    .fetch_optional(&st.db)
+    .await?;
+    if exists.is_none() {
+        return Err(AppError::bad("远程机器不存在"));
+    }
+    let rows: Vec<(String, String, String, i64, Option<String>, i64, i64, i64, i64, String, String)> =
+        sqlx::query_as(
+            "SELECT id, name, content_type, size, direct_url, packaged, source_count, entry_count,
+                    CASE WHEN content IS NULL AND direct_url IS NOT NULL THEN 1 ELSE 0 END AS large_file,
+                    created_at, expires_at
+             FROM remote_files
+             WHERE user_id = ? AND machine_id = ? AND expires_at > datetime('now')
+             ORDER BY created_at DESC
+             LIMIT 50",
+        )
+        .bind(user.0.sub)
+        .bind(&machine_id)
+        .fetch_all(&st.db)
+        .await?;
+    let prefix = forwarded_prefix(&headers);
+    let files = rows
+        .into_iter()
+        .map(|(id, name, content_type, size, direct_url, packaged, source_count, entry_count, large_file, created_at, expires_at)| {
+            json!({
+                "id": id,
+                "name": name,
+                "content_type": content_type,
+                "size": size,
+                "download_url": format!("{}/api/remote/files/{}/{}", prefix, id, urlencoding::encode(&name)),
+                "direct_url": direct_url,
+                "large_file": large_file != 0,
+                "packaged": packaged != 0,
+                "source_count": source_count,
+                "entry_count": entry_count,
+                "created_at": created_at,
+                "expires_at": expires_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "files": files })))
+}
+
+async fn download_relay_file(
+    State(st): State<AppState>,
+    Path((file_id, _name)): Path<(String, String)>,
+) -> AppResult<Response> {
+    download_file_by_id(&st, &file_id).await
+}
+
+async fn download_relay_file_plain(
+    State(st): State<AppState>,
+    Path(file_id): Path<String>,
+) -> AppResult<Response> {
+    download_file_by_id(&st, &file_id).await
+}
+
+async fn download_file_by_id(st: &AppState, file_id: &str) -> AppResult<Response> {
+    let row: Option<(String, String, i64, Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
+        "SELECT name, content_type, size, content, direct_url
+         FROM remote_files
+         WHERE id = ? AND expires_at > datetime('now')",
+    )
+    .bind(file_id)
+    .fetch_optional(&st.db)
+    .await?;
+    let (name, content_type, size, content, direct_url) =
+        row.ok_or_else(|| AppError::bad("文件不存在或已过期"))?;
+    sqlx::query("UPDATE remote_files SET downloaded_at = datetime('now') WHERE id = ?")
+        .bind(file_id)
+        .execute(&st.db)
+        .await?;
+    let bytes = match content {
+        Some(bytes) => bytes,
+        None => {
+            let url = direct_url.ok_or_else(|| AppError::bad("文件内容不存在"))?;
+            let mut res = Response::new(Body::empty());
+            *res.status_mut() = StatusCode::FOUND;
+            res.headers_mut().insert(
+                header::LOCATION,
+                url.parse()
+                    .map_err(|_| AppError::bad("局域网下载链接无效"))?,
+            );
+            return Ok(res);
+        }
+    };
+    let mut res = Response::new(Body::from(bytes));
+    *res.status_mut() = StatusCode::OK;
+    let headers = res.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        content_type
+            .parse()
+            .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
+    );
+    headers.insert(header::CONTENT_LENGTH, size.to_string().parse().unwrap());
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        content_disposition_attachment(&name).parse().unwrap(),
+    );
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    Ok(res)
+}
+
+async fn relay_session_machine(st: &AppState, session_id: &str) -> AppResult<(i64, String)> {
+    let row: Option<(i64, String)> = sqlx::query_as(
+        "SELECT user_id, machine_id
+         FROM remote_relay_sessions
+         WHERE id = ? AND status = 'connected' AND revoked_at IS NULL AND expires_at > datetime('now')",
+    )
+    .bind(session_id)
+    .fetch_optional(&st.db)
+    .await?;
+    row.ok_or_else(|| AppError::bad("远程连接无效或已过期"))
+}
+
+async fn connect_relay_pairing(
+    State(st): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    let code = sanitize_code(&code);
+    let supplied_client_key = req
+        .get("client_key")
+        .or_else(|| req.get("clientKey"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let row: Option<(String, i64, String, String, String, Option<String>, String, String, String)> =
+        sqlx::query_as(
+            "SELECT id, user_id, machine_id, client_key, machine_key, direct_url, direct_urls_json, expires_at, status
+             FROM remote_relay_sessions
+             WHERE code = ? AND revoked_at IS NULL AND expires_at > datetime('now')",
+        )
+        .bind(&code)
+        .fetch_optional(&st.db)
+        .await?;
+    let (
+        session_id,
+        user_id,
+        machine_id,
+        client_key,
+        _machine_key,
+        direct_url,
+        direct_urls_json,
+        expires_at,
+        _status,
+    ) = row.ok_or_else(|| AppError::bad("连接码无效或已过期"))?;
+    if supplied_client_key != client_key {
+        return Err(AppError::unauthorized("远程连接密钥无效"));
+    }
+    sqlx::query(
+        "UPDATE remote_relay_sessions
+         SET status = 'connected', connected_at = COALESCE(connected_at, datetime('now')), last_client_at = datetime('now')
+         WHERE id = ?",
+    )
+    .bind(&session_id)
+    .execute(&st.db)
+    .await?;
+    let direct_urls: serde_json::Value =
+        serde_json::from_str(&direct_urls_json).unwrap_or_else(|_| json!([]));
+    Ok(Json(json!({
+        "ok": true,
+        "session_id": session_id,
+        "machine_id": machine_id,
+        "user_id": user_id,
+        "code": code,
+        "client_key": client_key,
+        "direct_url": direct_url,
+        "direct_urls": direct_urls,
+        "expires_at": expires_at,
+    })))
+}
+
+async fn create_relay_command(
+    State(st): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<CreateCommandReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let (user_id, machine_id) = relay_session_machine(&st, &session_id).await?;
+    if req.command_type.trim().is_empty() {
+        return Err(AppError::bad("命令类型不能为空"));
+    }
+    let command_id = crypto::new_uuid();
+    sqlx::query(
+        "INSERT INTO remote_commands (id, user_id, machine_id, relay_session_id, command_type, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&command_id)
+    .bind(user_id)
+    .bind(&machine_id)
+    .bind(&session_id)
+    .bind(req.command_type.trim())
+    .bind(req.payload.to_string())
+    .execute(&st.db)
+    .await?;
+    sqlx::query("UPDATE remote_relay_sessions SET last_client_at = datetime('now') WHERE id = ?")
+        .bind(&session_id)
+        .execute(&st.db)
+        .await?;
+    Ok(Json(json!({
+        "ok": true,
+        "command_id": command_id,
+        "status": "pending",
+    })))
+}
+
+async fn list_relay_commands(
+    State(st): State<AppState>,
+    Path(session_id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let (user_id, machine_id) = relay_session_machine(&st, &session_id).await?;
+    let rows: Vec<(String, String, String, String, Option<String>, Option<String>, String, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT id, command_type, payload_json, status, result_json, error, created_at, claimed_at, finished_at
+             FROM remote_commands
+             WHERE user_id = ? AND machine_id = ? AND relay_session_id = ?
+             ORDER BY created_at DESC
+             LIMIT 50",
+        )
+        .bind(user_id)
+        .bind(&machine_id)
+        .bind(&session_id)
+        .fetch_all(&st.db)
+        .await?;
+    sqlx::query("UPDATE remote_relay_sessions SET last_client_at = datetime('now') WHERE id = ?")
+        .bind(&session_id)
+        .execute(&st.db)
+        .await?;
+    let commands = rows
+        .into_iter()
+        .map(|(id, command_type, payload_json, status, result_json, error, created_at, claimed_at, finished_at)| {
+            json!({
+                "id": id,
+                "command_type": command_type,
+                "payload": serde_json::from_str::<serde_json::Value>(&payload_json).unwrap_or_else(|_| json!({})),
+                "status": status,
+                "result": result_json.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
+                "error": error,
+                "created_at": created_at,
+                "claimed_at": claimed_at,
+                "finished_at": finished_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "commands": commands })))
+}
+
+async fn list_relay_files(
+    headers: HeaderMap,
+    State(st): State<AppState>,
+    Path(session_id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let (user_id, machine_id) = relay_session_machine(&st, &session_id).await?;
+    let rows: Vec<(String, String, String, i64, Option<String>, i64, i64, i64, i64, String, String)> =
+        sqlx::query_as(
+            "SELECT id, name, content_type, size, direct_url, packaged, source_count, entry_count,
+                    CASE WHEN content IS NULL AND direct_url IS NOT NULL THEN 1 ELSE 0 END AS large_file,
+                    created_at, expires_at
+             FROM remote_files
+             WHERE user_id = ? AND machine_id = ? AND expires_at > datetime('now')
+             ORDER BY created_at DESC
+             LIMIT 50",
+        )
+        .bind(user_id)
+        .bind(&machine_id)
+        .fetch_all(&st.db)
+        .await?;
+    let prefix = forwarded_prefix(&headers);
+    let files = rows
+        .into_iter()
+        .map(|(id, name, content_type, size, direct_url, packaged, source_count, entry_count, large_file, created_at, expires_at)| {
+            json!({
+                "id": id,
+                "name": name,
+                "content_type": content_type,
+                "size": size,
+                "download_url": format!("{}/api/remote/files/{}/{}", prefix, id, urlencoding::encode(&name)),
+                "direct_url": direct_url,
+                "large_file": large_file != 0,
+                "packaged": packaged != 0,
+                "source_count": source_count,
+                "entry_count": entry_count,
+                "created_at": created_at,
+                "expires_at": expires_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "files": files })))
+}
+
+#[derive(Deserialize)]
 struct RemotePageQuery {
     #[serde(default)]
     code: Option<String>,
 }
 
-async fn remote_web_page(Query(q): Query<RemotePageQuery>) -> Html<String> {
-    Html(remote_page_html_modern(q.code.as_deref()))
+async fn remote_web_page(headers: HeaderMap, Query(q): Query<RemotePageQuery>) -> Html<String> {
+    Html(remote_page_html_modern(
+        q.code.as_deref(),
+        &public_path(&headers, ""),
+    ))
 }
 
 fn html_escape(value: &str) -> String {
@@ -610,8 +1207,9 @@ fn html_escape(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn remote_page_html_modern(code: Option<&str>) -> String {
+fn remote_page_html_modern(code: Option<&str>, api_base: &str) -> String {
     let initial_code = html_escape(&code.map(sanitize_code).unwrap_or_default());
+    let api_base_json = serde_json::to_string(api_base).unwrap_or_else(|_| "\"\"".to_string());
     r###"<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -619,839 +1217,82 @@ fn remote_page_html_modern(code: Option<&str>) -> String {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>智界助手远程连接</title>
   <link rel="icon" href="data:," />
-  <script>
-    (function () {
-      var key = 'deskagent.themeMode';
-      var mode = localStorage.getItem(key) || 'auto';
-      function autoTheme() {
-        var hour = new Date().getHours();
-        if (hour >= 22 || hour < 7) return 'dark';
-        if (hour >= 18) return 'eye';
-        return 'light';
-      }
-      document.documentElement.dataset.themeMode = mode;
-      document.documentElement.dataset.theme = mode === 'auto' ? autoTheme() : mode;
-    })();
-  </script>
   <style>
-    :root {
-      color-scheme: light;
-      --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
-      --font-mono: "SF Mono", Menlo, Consolas, monospace;
-      --bg: #f7f4ed;
-      --paper: rgba(255, 253, 247, 0.9);
-      --paper-strong: #fffdf8;
-      --paper-soft: rgba(247, 243, 234, 0.76);
-      --line: rgba(58, 88, 75, 0.16);
-      --line-strong: rgba(58, 88, 75, 0.28);
-      --text: #20241f;
-      --muted: #777b72;
-      --faint: #a8a99f;
-      --accent: #2f7a59;
-      --accent-strong: #216447;
-      --accent-soft: rgba(47, 122, 89, 0.12);
-      --gold: #b39150;
-      --danger: #b94a42;
-      --ok: #2f8c5b;
-      --shadow: 0 20px 46px rgba(67, 57, 35, 0.12);
-      --shadow-soft: 0 10px 28px rgba(67, 57, 35, 0.08);
-    }
-    :root[data-theme="dark"] {
-      color-scheme: dark;
-      --bg: #0f1210;
-      --paper: rgba(21, 24, 21, 0.86);
-      --paper-strong: #161a17;
-      --paper-soft: rgba(28, 32, 29, 0.72);
-      --line: rgba(198, 211, 185, 0.13);
-      --line-strong: rgba(198, 211, 185, 0.24);
-      --text: #ece9de;
-      --muted: #a9ad9e;
-      --faint: #747a6f;
-      --accent: #9ab77d;
-      --accent-strong: #c8d7a0;
-      --accent-soft: rgba(154, 183, 125, 0.16);
-      --gold: #d8b46a;
-      --danger: #e06a61;
-      --ok: #90c28f;
-      --shadow: 0 22px 50px rgba(0, 0, 0, 0.42);
-      --shadow-soft: 0 12px 34px rgba(0, 0, 0, 0.28);
-    }
-    :root[data-theme="eye"] {
-      --bg: #f4efd9;
-      --paper: rgba(250, 246, 229, 0.9);
-      --paper-strong: #fbf7e7;
-      --paper-soft: rgba(239, 232, 204, 0.68);
-      --line: rgba(95, 105, 64, 0.18);
-      --line-strong: rgba(95, 105, 64, 0.32);
-      --text: #23281d;
-      --muted: #73785f;
-      --faint: #9b9b80;
-      --accent: #5f8d45;
-      --accent-strong: #3f6d31;
-      --accent-soft: rgba(95, 141, 69, 0.14);
-      --gold: #a77f3e;
-      --danger: #aa584a;
-      --ok: #4f8d43;
-      --shadow: 0 18px 42px rgba(86, 75, 40, 0.13);
-      --shadow-soft: 0 10px 26px rgba(86, 75, 40, 0.09);
-    }
-    * { box-sizing: border-box; }
-    html,
-    body {
-      margin: 0;
-      min-height: 100%;
-    }
-    body {
-      position: relative;
-      min-width: 320px;
-      min-height: 100vh;
-      overflow-x: hidden;
-      color: var(--text);
-      font-family: var(--font-sans);
-      font-size: 14px;
-      letter-spacing: 0;
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.34), transparent 34%),
-        linear-gradient(180deg, var(--paper-strong), var(--bg));
-    }
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      background:
-        linear-gradient(140deg, transparent 0 42%, rgba(47, 122, 89, 0.055) 42% 58%, transparent 58%),
-        repeating-linear-gradient(0deg, rgba(94, 83, 53, 0.018), rgba(94, 83, 53, 0.018) 1px, transparent 1px, transparent 18px);
-      opacity: 0.82;
-    }
-    :root[data-theme="dark"] body {
-      background:
-        linear-gradient(135deg, rgba(211, 183, 111, 0.08), transparent 36%),
-        linear-gradient(180deg, #141812, #0e110f);
-    }
-    :root[data-theme="dark"] body::before {
-      background:
-        linear-gradient(140deg, transparent 0 42%, rgba(154, 183, 125, 0.055) 42% 58%, transparent 58%),
-        repeating-linear-gradient(0deg, rgba(232, 226, 205, 0.018), rgba(232, 226, 205, 0.018) 1px, transparent 1px, transparent 18px);
-    }
-    button,
-    input,
-    textarea {
-      font: inherit;
-    }
-    .app {
-      position: relative;
-      z-index: 1;
-      display: grid;
-      grid-template-columns: minmax(256px, 330px) minmax(0, 1fr);
-      gap: 18px;
-      width: min(1180px, 100%);
-      min-height: 100vh;
-      margin: 0 auto;
-      padding: 18px;
-    }
-    .sidebar,
-    .workspace {
-      min-width: 0;
-    }
-    .sidebar {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      min-height: calc(100vh - 36px);
-      padding: 16px 14px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: linear-gradient(180deg, var(--paper), rgba(246, 242, 231, 0.72));
-      box-shadow: var(--shadow-soft);
-      backdrop-filter: blur(18px);
-    }
-    :root[data-theme="dark"] .sidebar {
-      background: linear-gradient(180deg, rgba(19, 23, 20, 0.92), rgba(12, 15, 13, 0.76));
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 0;
-      padding: 0 2px 6px;
-    }
-    .logo {
-      display: grid;
-      flex: 0 0 38px;
-      width: 38px;
-      height: 38px;
-      place-items: center;
-      border: 1px solid var(--line-strong);
-      border-radius: 50%;
-      color: var(--accent-strong);
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.72), rgba(255,255,255,0.12)),
-        var(--accent-soft);
-      font-size: 19px;
-      font-weight: 700;
-      box-shadow: inset 0 0 0 3px rgba(255,255,255,0.24);
-    }
-    .brand-copy {
-      min-width: 0;
-    }
-    .brand-name {
-      overflow: hidden;
-      font-size: 17px;
-      font-weight: 700;
-      line-height: 1.25;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .brand-sub {
-      overflow: hidden;
-      margin-top: 2px;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.25;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .theme-switcher {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 4px;
-      padding: 4px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--paper-soft);
-    }
-    .theme-btn {
-      min-height: 30px;
-      padding: 0 6px;
-      border: 1px solid transparent;
-      border-radius: 6px;
-      color: var(--muted);
-      background: transparent;
-      cursor: pointer;
-      font-size: 12px;
-      line-height: 1;
-    }
-    .theme-btn.active {
-      border-color: var(--line-strong);
-      color: var(--text);
-      background: var(--paper-strong);
-      box-shadow: var(--shadow-soft);
-    }
-    :root[data-theme="dark"] .theme-btn.active {
-      background: rgba(255,255,255,0.08);
-    }
-    .section-title {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-height: 22px;
-      margin: 2px 4px 0;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.2;
-    }
-    .section-mark {
-      width: 34px;
-      height: 1px;
-      background: var(--line-strong);
-    }
-    .connection-card,
-    .panel {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--paper);
-      box-shadow: var(--shadow-soft);
-      backdrop-filter: blur(16px);
-    }
-    .connection-card {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      padding: 14px;
-    }
-    .status-badge {
-      display: inline-flex;
-      align-items: center;
-      align-self: flex-start;
-      gap: 7px;
-      min-height: 28px;
-      padding: 5px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      color: var(--muted);
-      background: var(--paper-soft);
-      font-size: 12px;
-      line-height: 1;
-    }
-    .status-badge::before {
-      content: "";
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--faint);
-    }
-    .status-badge.live::before {
-      background: var(--ok);
-      box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 18%, transparent);
-    }
-    .status-badge.error::before {
-      background: var(--danger);
-      box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 18%, transparent);
-    }
-    .pairing-code {
-      display: grid;
-      min-height: 76px;
-      place-items: center;
-      border: 1px dashed var(--line-strong);
-      border-radius: 8px;
-      color: var(--accent-strong);
-      background: var(--accent-soft);
-      font-family: var(--font-mono);
-      font-size: 28px;
-      font-weight: 760;
-      letter-spacing: 0;
-      word-break: break-all;
-    }
-    .machine {
-      display: none;
-      gap: 8px;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      color: var(--muted);
-      background: var(--paper-soft);
-      font-size: 13px;
-      line-height: 1.25;
-    }
-    .machine strong {
-      color: var(--text);
-    }
-    .help {
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.6;
-    }
-    .workspace {
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      min-height: calc(100vh - 36px);
-    }
-    .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 14px;
-      min-height: 58px;
-      padding: 10px 18px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.28);
-      backdrop-filter: blur(16px);
-    }
-    :root[data-theme="dark"] .topbar {
-      background: rgba(13, 16, 14, 0.72);
-    }
-    h1 {
-      margin: 0;
-      font-size: 20px;
-      line-height: 1.2;
-    }
-    .topbar p {
-      margin: 4px 0 0;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.35;
-    }
-    .workspace-status {
-      flex: 0 0 auto;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.35;
-      text-align: right;
-    }
-    .panel {
-      padding: 16px;
-    }
-    .panel-lg {
-      flex: 1 1 auto;
-      display: flex;
-      flex-direction: column;
-      min-height: 0;
-    }
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      min-width: 0;
-    }
-    label {
-      display: block;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.35;
-    }
-    input,
-    textarea {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      color: var(--text);
-      background: var(--paper-soft);
-      font: inherit;
-      outline: none;
-    }
-    input:focus,
-    textarea:focus {
-      border-color: color-mix(in srgb, var(--accent) 62%, var(--line));
-      box-shadow: 0 0 0 3px var(--accent-soft);
-    }
-    input {
-      height: 42px;
-      padding: 0 11px;
-      letter-spacing: 0;
-    }
-    #code {
-      text-transform: uppercase;
-      font-family: var(--font-mono);
-      font-weight: 700;
-    }
-    textarea {
-      flex: 1 1 auto;
-      min-height: 184px;
-      padding: 11px;
-      line-height: 1.55;
-      resize: vertical;
-    }
-    button {
-      min-height: 40px;
-      padding: 0 14px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      color: var(--text);
-      background: var(--paper-soft);
-      cursor: pointer;
-      font: inherit;
-      font-weight: 650;
-    }
-    button:hover:not(:disabled) {
-      border-color: var(--accent);
-      background: var(--accent-soft);
-    }
-    button.primary {
-      border-color: rgba(255,255,255,0.18);
-      color: #fff;
-      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-      box-shadow: var(--shadow-soft);
-    }
-    :root[data-theme="dark"] button.primary {
-      color: #0f1210;
-    }
-    button:disabled {
-      cursor: default;
-      opacity: .55;
-    }
-    .row {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      min-width: 0;
-    }
-    .row > * {
-      flex: 1 1 auto;
-      min-width: 0;
-    }
-    .row > button {
-      flex: 0 0 auto;
-    }
-    .status {
-      min-height: 22px;
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.5;
-    }
-    .status.error {
-      color: var(--danger);
-    }
-    .commands {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      max-height: 38vh;
-      margin-top: 12px;
-      overflow: auto;
-    }
-    .commands:empty::before {
-      content: "暂无远程任务";
-      display: block;
-      padding: 12px;
-      border: 1px dashed var(--line);
-      border-radius: 8px;
-      color: var(--faint);
-      font-size: 13px;
-    }
-    .command {
-      padding: 10px 11px;
-      overflow-wrap: anywhere;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      color: var(--muted);
-      background: var(--paper-soft);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-    .command strong {
-      color: var(--text);
-    }
-    .command-meta {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 5px;
-      font-size: 12px;
-    }
-    .command-error {
-      display: block;
-      margin-top: 5px;
-      color: var(--danger);
-    }
-    @media (max-width: 860px) {
-      .app {
-        grid-template-columns: 1fr;
-        gap: 12px;
-        padding: 12px;
-      }
-      .sidebar,
-      .workspace {
-        min-height: auto;
-      }
-      .topbar {
-        align-items: flex-start;
-        flex-direction: column;
-      }
-      .workspace-status {
-        text-align: left;
-      }
-      .pairing-code {
-        min-height: 58px;
-        font-size: 22px;
-      }
-      textarea {
-        min-height: 148px;
-      }
-      .commands {
-        max-height: none;
-      }
-    }
-    @media (max-width: 560px) {
-      .app {
-        padding: 10px;
-      }
-      .sidebar,
-      .panel,
-      .topbar {
-        padding: 12px;
-      }
-      .row {
-        flex-direction: column;
-        align-items: stretch;
-      }
-      .row > button {
-        width: 100%;
-      }
-      .brand-name {
-        font-size: 16px;
-      }
-      h1 {
-        font-size: 18px;
-      }
-      .theme-btn {
-        padding: 0 4px;
-      }
-    }
+    :root { color-scheme: light dark; --bg:#f6f7fb; --surface:#fff; --soft:#eef2f7; --line:#d7deea; --text:#172033; --muted:#667085; --accent:#2563eb; --ok:#15803d; --danger:#dc2626; }
+    * { box-sizing:border-box; }
+    html, body { margin:0; min-height:100%; }
+    body { min-height:100svh; color:var(--text); background:var(--bg); font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+    main { width:min(820px,100%); min-height:100svh; margin:0 auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
+    header { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:12px 0; }
+    h1 { margin:0; font-size:20px; line-height:1.2; }
+    .pill { padding:6px 9px; border:1px solid var(--line); border-radius:999px; color:var(--muted); background:var(--surface); font-size:12px; }
+    .panel { border:1px solid var(--line); border-radius:8px; background:var(--surface); overflow:hidden; }
+    .status { padding:10px 12px; border-bottom:1px solid var(--line); color:var(--muted); font-size:13px; line-height:1.45; }
+    .messages { flex:1; min-height:280px; max-height:55svh; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:9px; background:var(--soft); }
+    .msg { max-width:88%; padding:10px 12px; border-radius:13px; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.55; font-size:15px; }
+    .me { align-self:flex-end; color:#fff; background:var(--accent); border-bottom-right-radius:4px; }
+    .ai { align-self:flex-start; border:1px solid var(--line); background:var(--surface); border-bottom-left-radius:4px; }
+    .sys { align-self:center; color:var(--muted); background:var(--surface); border:1px solid var(--line); font-size:13px; }
+    form { display:flex; gap:8px; padding:10px; border-top:1px solid var(--line); }
+    textarea { flex:1; min-height:48px; max-height:140px; resize:vertical; padding:10px; border:1px solid var(--line); border-radius:8px; font:inherit; font-size:16px; }
+    button { min-width:72px; border:0; border-radius:8px; color:#fff; background:var(--accent); font:inherit; font-weight:700; cursor:pointer; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .files { padding:10px; display:flex; flex-direction:column; gap:8px; }
+    .files:empty::before { content:"暂无可下载文件"; color:var(--muted); font-size:13px; }
+    .file { display:flex; justify-content:space-between; gap:10px; padding:10px; border:1px solid var(--line); border-radius:8px; color:var(--text); text-decoration:none; }
+    .file span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .file span:last-child { flex:0 0 auto; color:var(--muted); font-size:12px; }
+    .err { color:var(--danger); }
+    @media (max-width:560px){ main{padding:0}.panel{border-left:0;border-right:0;border-radius:0}.messages{max-height:calc(100svh - 210px)} header{padding:12px}.msg{max-width:92%} }
+    @media (prefers-color-scheme: dark){ :root{--bg:#0f131a;--surface:#161b24;--soft:#10151d;--line:#293241;--text:#edf2f7;--muted:#98a2b3;--accent:#3b82f6;} }
   </style>
 </head>
 <body>
-  <main class="app">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="logo">智</div>
-        <div class="brand-copy">
-          <div class="brand-name">智界助手</div>
-          <div class="brand-sub">远程连接</div>
-        </div>
-      </div>
-      <div class="theme-switcher" aria-label="主题切换">
-        <button class="theme-btn" type="button" data-theme-mode-value="auto">自动</button>
-        <button class="theme-btn" type="button" data-theme-mode-value="light">浅色</button>
-        <button class="theme-btn" type="button" data-theme-mode-value="dark">深色</button>
-        <button class="theme-btn" type="button" data-theme-mode-value="eye">护眼</button>
-      </div>
-      <div class="section-title"><span>连接状态</span><span class="section-mark"></span></div>
-      <section class="connection-card">
-        <div class="status-badge" id="statusBadge">待连接</div>
-        <div class="pairing-code" id="pairingCode">--------</div>
-        <div class="machine" id="machine"></div>
-        <p class="help" id="connectionHelp">输入桌面助手侧边栏中的连接码后，即可把任务发送到这台电脑。</p>
-      </section>
-    </aside>
-
-    <section class="workspace">
-      <header class="topbar">
-        <div>
-          <h1>远程任务</h1>
-          <p>保持和桌面端一致的会话入口。</p>
-        </div>
-        <div class="workspace-status" id="workspaceStatus">等待连接</div>
-      </header>
-
-      <section class="panel">
-        <div class="field">
-          <label for="token">登录凭证</label>
-          <div class="row">
-            <input id="token" type="password" autocomplete="current-password" placeholder="粘贴你的会员 Token" />
-            <button id="saveToken" type="button">保存</button>
-          </div>
-        </div>
-        <div class="status" id="authStatus">Token 仅保存在当前浏览器。</div>
-      </section>
-
-      <section class="panel">
-        <div class="field">
-          <label for="code">连接码</label>
-          <div class="row">
-            <input id="code" value="__INITIAL_CODE__" maxlength="16" placeholder="例如 ABC23456" />
-            <button id="connect" class="primary" type="button">连接</button>
-          </div>
-        </div>
-        <div class="status" id="connectStatus"></div>
-      </section>
-
-      <section class="panel panel-lg">
-        <div class="field" style="flex:1 1 auto">
-          <label for="message">远程任务</label>
-          <textarea id="message" placeholder="例如：帮我在电脑上整理下载目录，并列出大文件。"></textarea>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button id="send" class="primary" type="button" disabled>发送到电脑</button>
-          <button id="refresh" type="button" disabled>刷新状态</button>
-        </div>
-        <div class="status" id="sendStatus"></div>
-        <div class="commands" id="commands"></div>
-      </section>
+  <main>
+    <header><h1>智界助手</h1><span class="pill" id="state">连接中</span></header>
+    <section class="panel">
+      <div class="status" id="status">正在连接桌面端...</div>
+      <div class="messages" id="messages"></div>
+      <form id="form">
+        <textarea id="text" placeholder="输入要发送给电脑上的智界助手的任务..."></textarea>
+        <button id="send" type="submit">发送</button>
+      </form>
     </section>
+    <section class="panel"><div class="status">可下载文件</div><div class="files" id="files"></div></section>
   </main>
   <script>
-    const THEME_STORAGE_KEY = 'deskagent.themeMode';
-    const tokenEl = document.getElementById('token');
-    const saveTokenEl = document.getElementById('saveToken');
-    const authStatusEl = document.getElementById('authStatus');
-    const codeEl = document.getElementById('code');
-    const pairingCodeEl = document.getElementById('pairingCode');
-    const connectEl = document.getElementById('connect');
-    const connectStatusEl = document.getElementById('connectStatus');
-    const statusBadgeEl = document.getElementById('statusBadge');
-    const workspaceStatusEl = document.getElementById('workspaceStatus');
-    const machineEl = document.getElementById('machine');
-    const connectionHelpEl = document.getElementById('connectionHelp');
-    const messageEl = document.getElementById('message');
+    const initialCode = "__INITIAL_CODE__";
+    const params = new URLSearchParams(location.search);
+    const hashParams = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+    const code = (params.get('code') || initialCode || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
+    const clientKey = hashParams.get('k') || params.get('k') || '';
+    const apiBase = __API_BASE_JSON__;
+    const stateEl = document.getElementById('state');
+    const statusEl = document.getElementById('status');
+    const messagesEl = document.getElementById('messages');
+    const filesEl = document.getElementById('files');
+    const form = document.getElementById('form');
+    const textEl = document.getElementById('text');
     const sendEl = document.getElementById('send');
-    const refreshEl = document.getElementById('refresh');
-    const sendStatusEl = document.getElementById('sendStatus');
-    const commandsEl = document.getElementById('commands');
-    const themeButtons = Array.from(document.querySelectorAll('.theme-btn'));
-
+    let sessionId = '';
     let machineId = '';
-    let pollTimer = null;
-    tokenEl.value = localStorage.getItem('deskagent.remote.token') || '';
-    updatePairingCode();
-    applyThemeMode(localStorage.getItem(THEME_STORAGE_KEY) || 'auto', false);
-
-    function autoThemeForNow() {
-      const hour = new Date().getHours();
-      if (hour >= 22 || hour < 7) return 'dark';
-      if (hour >= 18) return 'eye';
-      return 'light';
-    }
-
-    function applyThemeMode(mode, persist = true) {
-      const nextMode = ['auto', 'light', 'dark', 'eye'].includes(mode) ? mode : 'auto';
-      const theme = nextMode === 'auto' ? autoThemeForNow() : nextMode;
-      document.documentElement.dataset.themeMode = nextMode;
-      document.documentElement.dataset.theme = theme;
-      if (persist) localStorage.setItem(THEME_STORAGE_KEY, nextMode);
-      themeButtons.forEach((button) => {
-        button.classList.toggle('active', button.dataset.themeModeValue === nextMode);
-      });
-    }
-
-    setInterval(() => {
-      if ((localStorage.getItem(THEME_STORAGE_KEY) || 'auto') === 'auto') {
-        applyThemeMode('auto', false);
-      }
-    }, 60000);
-
-    themeButtons.forEach((button) => {
-      button.addEventListener('click', () => applyThemeMode(button.dataset.themeModeValue || 'auto'));
-    });
-
-    function token() {
-      return tokenEl.value.trim();
-    }
-
-    function setStatus(el, text, error = false) {
-      el.textContent = text || '';
-      el.classList.toggle('error', !!error);
-    }
-
-    function setBadge(text, type = '') {
-      statusBadgeEl.textContent = text;
-      statusBadgeEl.classList.toggle('live', type === 'live');
-      statusBadgeEl.classList.toggle('error', type === 'error');
-    }
-
-    function updatePairingCode() {
-      const code = codeEl.value.replace(/[^a-z0-9]/gi, '').toUpperCase();
-      pairingCodeEl.textContent = code || '--------';
-    }
-
-    async function api(path, options = {}) {
-      const headers = { 'Content-Type': 'application/json' };
-      if (token()) headers.Authorization = 'Bearer ' + token();
-      const res = await fetch(path, {
-        method: options.method || 'GET',
-        headers,
-        body: options.body ? JSON.stringify(options.body) : undefined,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error((data.error && data.error.message) || '请求失败 (' + res.status + ')');
-      }
-      return data;
-    }
-
-    saveTokenEl.addEventListener('click', () => {
-      localStorage.setItem('deskagent.remote.token', token());
-      setStatus(authStatusEl, '已保存。');
-    });
-
-    codeEl.addEventListener('input', updatePairingCode);
-    connectEl.addEventListener('click', connect);
-    sendEl.addEventListener('click', sendMessage);
-    refreshEl.addEventListener('click', refreshCommands);
-
-    async function connect() {
-      const code = codeEl.value.replace(/[^a-z0-9]/gi, '').toUpperCase();
-      codeEl.value = code;
-      updatePairingCode();
-      if (!token()) {
-        setBadge('缺少凭证', 'error');
-        return setStatus(connectStatusEl, '请先填写登录凭证。', true);
-      }
-      if (!code) {
-        setBadge('缺少连接码', 'error');
-        return setStatus(connectStatusEl, '请输入连接码。', true);
-      }
-      connectEl.disabled = true;
-      try {
-        setBadge('连接中');
-        workspaceStatusEl.textContent = '正在连接电脑';
-        setStatus(connectStatusEl, '正在连接...');
-        const info = await api('/api/remote/pairings/' + encodeURIComponent(code), { method: 'POST' });
-        machineId = info.machine_id;
-        machineEl.style.display = 'grid';
-        machineEl.textContent = '';
-        const machineLine = document.createElement('div');
-        machineLine.append('已连接：');
-        const strong = document.createElement('strong');
-        strong.textContent = machineId.slice(0, 12);
-        machineLine.appendChild(strong);
-        machineEl.appendChild(machineLine);
-        sendEl.disabled = false;
-        refreshEl.disabled = false;
-        setBadge('已连接', 'live');
-        workspaceStatusEl.textContent = '电脑在线，等待任务';
-        connectionHelpEl.textContent = '连接已建立，发送的任务会进入桌面端会话。';
-        setStatus(connectStatusEl, '连接成功。');
-        await refreshCommands();
-        if (pollTimer) clearInterval(pollTimer);
-        pollTimer = setInterval(refreshCommands, 3000);
-      } catch (error) {
-        setBadge('连接失败', 'error');
-        workspaceStatusEl.textContent = '连接失败';
-        setStatus(connectStatusEl, error.message, true);
-      } finally {
-        connectEl.disabled = false;
-      }
-    }
-
-    async function sendMessage() {
-      const text = messageEl.value.trim();
-      if (!machineId) return setStatus(sendStatusEl, '请先连接电脑。', true);
-      if (!text) return setStatus(sendStatusEl, '请输入任务。', true);
-      sendEl.disabled = true;
-      try {
-        const created = await api('/api/remote/machines/' + encodeURIComponent(machineId) + '/commands', {
-          method: 'POST',
-          body: { command_type: 'chat_message', payload: { text } },
-        });
-        messageEl.value = '';
-        setStatus(sendStatusEl, '已发送：' + created.command_id.slice(0, 8));
-        workspaceStatusEl.textContent = '任务已发送，等待桌面端处理';
-        await refreshCommands();
-      } catch (error) {
-        setStatus(sendStatusEl, error.message, true);
-      } finally {
-        sendEl.disabled = false;
-      }
-    }
-
-    async function refreshCommands() {
-      if (!machineId) return;
-      try {
-        const data = await api('/api/remote/machines/' + encodeURIComponent(machineId) + '/commands');
-        commandsEl.textContent = '';
-        for (const command of (data.commands || []).slice(0, 10)) {
-          const div = document.createElement('div');
-          div.className = 'command';
-
-          const meta = document.createElement('div');
-          meta.className = 'command-meta';
-          const status = document.createElement('strong');
-          status.textContent = command.status || 'unknown';
-          const id = document.createElement('span');
-          id.textContent = (command.id || '').slice(0, 8);
-          meta.append(status, id);
-
-          const text = document.createElement('div');
-          const payload = command.payload || {};
-          text.textContent = payload.text || payload.prompt || command.command_type || '';
-
-          div.append(meta, text);
-          if (command.error) {
-            const err = document.createElement('span');
-            err.className = 'command-error';
-            err.textContent = command.error;
-            div.appendChild(err);
-          }
-          commandsEl.appendChild(div);
-        }
-      } catch (error) {
-        setStatus(sendStatusEl, error.message, true);
-      }
-    }
-
-    if (codeEl.value && token()) {
-      connect();
-    }
+    let polling = null;
+    let activeCommandId = '';
+    const shownCommands = new Set();
+    function setState(text, error=false){ stateEl.textContent=text; statusEl.textContent=text; statusEl.classList.toggle('err', error); }
+    function add(text, cls='sys'){ const el=document.createElement('div'); el.className='msg '+cls; el.textContent=text; messagesEl.appendChild(el); messagesEl.scrollTop=messagesEl.scrollHeight; return el; }
+    function size(n){ n=Number(n||0); if(n>=1073741824)return(n/1073741824).toFixed(1)+' GB'; if(n>=1048576)return(n/1048576).toFixed(1)+' MB'; if(n>=1024)return(n/1024).toFixed(1)+' KB'; return n+' B'; }
+    async function api(path, options={}){ const res=await fetch(apiBase+path,{method:options.method||'GET',headers:{'Content-Type':'application/json'},body:options.body?JSON.stringify(options.body):undefined}); const data=await res.json().catch(()=>({})); if(!res.ok) throw new Error((data.error&&data.error.message)||'请求失败 ('+res.status+')'); return data; }
+    function latestAssistant(result){ const events=(result&&result.events)||[]; for(let i=events.length-1;i>=0;i--){ if(events[i].type==='message'&&events[i].text) return events[i].text; } for(let i=events.length-1;i>=0;i--){ if(events[i].type==='delta'&&events[i].text) return events[i].text; } return ''; }
+    async function connect(){ if(!code) throw new Error('缺少连接码，请重新扫码'); if(!clientKey) throw new Error('缺少连接密钥，请重新扫码'); const info=await api('/api/remote/relay/pairings/'+encodeURIComponent(code),{method:'POST',body:{client_key:clientKey}}); sessionId=info.session_id; machineId=info.machine_id; stateEl.textContent='已连接'; statusEl.textContent='已连接到电脑 '+machineId.slice(0,12); add('已通过中心节点连接到桌面端。'); await refreshFiles(); textEl.focus(); }
+    async function sendMessage(text){ const created=await api('/api/remote/relay/sessions/'+encodeURIComponent(sessionId)+'/commands',{method:'POST',body:{command_type:'chat_message',payload:{text}}}); activeCommandId=created.command_id; return created.command_id; }
+    async function refreshCommands(){ if(!sessionId) return; const data=await api('/api/remote/relay/sessions/'+encodeURIComponent(sessionId)+'/commands'); const command=(data.commands||[]).find(c=>c.id===activeCommandId); if(command){ if(command.status==='completed'){ const reply=latestAssistant(command.result)||'任务已完成。'; if(!shownCommands.has(command.id)){ shownCommands.add(command.id); add(reply,'ai'); activeCommandId=''; await refreshFiles(); setState('回复完成'); } } else if(command.status==='failed'){ if(!shownCommands.has(command.id)){ shownCommands.add(command.id); add(command.error||'远程任务失败','sys err'); } activeCommandId=''; setState('任务失败',true); } else { stateEl.textContent='处理中'; statusEl.textContent='桌面端正在处理任务...'; } } }
+    async function refreshFiles(){ if(!sessionId) return; const data=await api('/api/remote/relay/sessions/'+encodeURIComponent(sessionId)+'/files'); filesEl.textContent=''; for(const file of data.files||[]){ const a=document.createElement('a'); a.className='file'; a.href=file.download_url; a.target='_blank'; a.rel='noreferrer'; a.download=file.name||''; const n=document.createElement('span'); n.textContent=file.name||'download'; const m=document.createElement('span'); m.textContent=(file.large_file?'局域网 ':'')+size(file.size); a.append(n,m); filesEl.appendChild(a); } }
+    form.addEventListener('submit', async (e)=>{ e.preventDefault(); const text=textEl.value.trim(); if(!text||!sessionId) return; sendEl.disabled=true; add(text,'me'); textEl.value=''; try{ await sendMessage(text); setState('已发送，等待桌面端回复'); }catch(err){ add(err.message||'发送失败','sys err'); setState('发送失败',true); activeCommandId=''; } finally{ sendEl.disabled=false; } });
+    connect().then(()=>{ polling=setInterval(()=>{ refreshCommands().catch(()=>{}); refreshFiles().catch(()=>{}); },2500); if(polling.unref) polling.unref(); }).catch(err=>{ setState(err.message||'连接失败',true); sendEl.disabled=true; });
   </script>
 </body>
-</html>"###.replace("__INITIAL_CODE__", &initial_code)
+</html>"###.replace("__INITIAL_CODE__", &initial_code).replace("__API_BASE_JSON__", &api_base_json)
 }
 
 #[allow(dead_code)]

@@ -8,8 +8,9 @@ const crypto = require('crypto');
 const QRCode = require('qrcode');
 const nacl = require('tweetnacl');
 
-const PAIRING_TTL_MS = 24 * 60 * 60 * 1000;
+const PAIRING_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const FILE_SHARE_TTL_MS = 24 * 60 * 60 * 1000;
+const RELAY_FILE_INLINE_MAX_BYTES = Number(process.env.DESKAGENT_REMOTE_RELAY_FILE_MAX_BYTES || 5 * 1024 * 1024);
 const MAX_BODY_BYTES = 256 * 1024;
 const REMOTE_TURN_TTL_MS = 15 * 60 * 1000;
 const MAX_REMOTE_EVENTS = 500;
@@ -231,6 +232,33 @@ function contentTypeFor(name) {
   return 'application/octet-stream';
 }
 
+function normalizeBackendUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function backendUrlFor(base, pathname) {
+  const cleanBase = normalizeBackendUrl(base);
+  if (!cleanBase) return '';
+  const cleanPath = `/${String(pathname || '').replace(/^\/+/, '')}`;
+  return `${cleanBase}${cleanPath}`;
+}
+
+async function fetchJson(url, options = {}) {
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const message = (data && data.error && data.error.message) || data.error || `请求失败 (${res.status})`;
+    throw new Error(message);
+  }
+  return data;
+}
+
 function remoteActivityDisplay(payload = {}) {
   if (payload.display) return payload.display;
   if (payload.kind === 'file') return '已修改文件：' + (payload.files || []).join(', ');
@@ -244,6 +272,23 @@ function remoteActivityDisplay(payload = {}) {
     return [status, payload.text || '', payload.output ? `结果：${payload.output}` : ''].filter(Boolean).join('\n');
   }
   return payload.text || '';
+}
+
+function waitForRemoteTurnDone(host, turn, timeoutMs = 20 * 60 * 1000) {
+  if (turn.done) return Promise.resolve(turn);
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if (turn.done) {
+        clearInterval(timer);
+        resolve(turn);
+      } else if (Date.now() - started > timeoutMs) {
+        clearInterval(timer);
+        reject(new Error('远程任务执行超时'));
+      }
+    }, 250);
+    if (timer.unref) timer.unref();
+  });
 }
 
 function fromBase64url(value) {
@@ -607,7 +652,7 @@ function remotePageHtml() {
       if (!(files || []).length) {
         const empty = document.createElement('div');
         empty.className = 'session-meta';
-        empty.textContent = '桌面端发送后会显示在这里';
+        empty.textContent = 'agent 发送给你的文件会显示在这里';
         filesEl.appendChild(empty);
         return;
       }
@@ -786,6 +831,8 @@ function remotePageHtml() {
         }
       } else if (event.type === 'activity') {
         updateActivity(event);
+      } else if (event.type === 'files_changed') {
+        renderFiles(event.files || []);
       } else if (event.type === 'error') {
         add(event.message || '远程任务失败', 'sys err');
         return true;
@@ -936,7 +983,15 @@ class RemoteHost extends EventEmitter {
     this.remoteTurns = new Map();
     this.wsClients = new Map();
     this.fileShares = new Map();
+    this.cloudFiles = new Map();
     this.engineListeners = null;
+    this.machineToken = '';
+    this.relayPollTimer = null;
+    this.relayBusy = false;
+    this.heartbeatTimer = null;
+    this.backendUrl = '';
+    this.relayEnabled = false;
+    this.relayLastSeenAt = '';
   }
 
   auth() {
@@ -952,14 +1007,157 @@ class RemoteHost extends EventEmitter {
     return !!(auth && auth.token);
   }
 
+  backendBaseUrl() {
+    const value = this.opts.backendUrl ? this.opts.backendUrl() : process.env.DESKAGENT_BACKEND_URL;
+    return normalizeBackendUrl(value);
+  }
+
+  userToken() {
+    const auth = this.auth();
+    return auth && auth.token ? auth.token : '';
+  }
+
+  async backendJson(pathname, { method = 'GET', body, machine = false } = {}) {
+    const base = this.backendBaseUrl();
+    if (!base) throw new Error('缺少中心节点地址');
+    const token = machine ? this.machineToken : this.userToken();
+    if (!token) throw new Error(machine ? '缺少机器凭证' : '缺少登录凭证');
+    return fetchJson(backendUrlFor(base, pathname), {
+      method,
+      headers: { Authorization: `Bearer ${token}` },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  async ensureMachineRegistration() {
+    const base = this.backendBaseUrl();
+    if (!base || !this.userToken()) {
+      this.relayEnabled = false;
+      return false;
+    }
+    const registered = await this.backendJson('/api/remote/machines', {
+      method: 'POST',
+      body: {
+        machine_id: this.machineId,
+        label: os.hostname() || 'DeskAgent',
+        hostname: os.hostname() || 'localhost',
+        platform: process.platform,
+        app_version: this.opts.appVersion || '',
+        metadata: {
+          mode: 'relay-encrypted',
+          workspaceDir: this.opts.workspaceDir || '',
+          directUrls: this.port ? networkUrls(this.port) : [],
+        },
+      },
+    });
+    this.machineToken = registered.machine_token;
+    this.backendUrl = base;
+    this.relayEnabled = true;
+    this.relayLastSeenAt = new Date().toISOString();
+    return true;
+  }
+
+  startRelayLoops() {
+    this.stopRelayLoops();
+    if (!this.running || !this.relayEnabled || !this.machineToken) return;
+    const poll = () => this.pollRelayCommands().catch((e) => {
+      this.lastError = `公网中继轮询失败：${(e && e.message) || e}`;
+      this.emitState();
+    });
+    const heartbeat = () => this.sendRelayHeartbeat().catch(() => {});
+    poll();
+    heartbeat();
+    this.relayPollTimer = setInterval(poll, 1800);
+    this.heartbeatTimer = setInterval(heartbeat, 15000);
+    if (this.relayPollTimer.unref) this.relayPollTimer.unref();
+    if (this.heartbeatTimer.unref) this.heartbeatTimer.unref();
+  }
+
+  stopRelayLoops() {
+    if (this.relayPollTimer) clearInterval(this.relayPollTimer);
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.relayPollTimer = null;
+    this.heartbeatTimer = null;
+    this.relayBusy = false;
+  }
+
+  async sendRelayHeartbeat() {
+    if (!this.relayEnabled || !this.machineToken) return;
+    await this.backendJson('/api/remote/machine/heartbeat', {
+      method: 'POST',
+      machine: true,
+      body: {
+        status: 'active',
+        metadata: {
+          mode: 'relay-encrypted',
+          directUrls: this.port ? networkUrls(this.port) : [],
+          fileShareCount: this.fileShares.size,
+        },
+      },
+    });
+    this.relayLastSeenAt = new Date().toISOString();
+  }
+
+  async pollRelayCommands() {
+    if (this.relayBusy || !this.relayEnabled || !this.machineToken) return;
+    this.relayBusy = true;
+    try {
+      const data = await this.backendJson('/api/remote/machine/commands', { machine: true });
+      for (const command of data.commands || []) {
+        await this.handleRelayCommand(command);
+      }
+      this.relayLastSeenAt = new Date().toISOString();
+      if (this.lastError && this.lastError.startsWith('公网中继')) this.lastError = '';
+    } finally {
+      this.relayBusy = false;
+    }
+  }
+
+  async handleRelayCommand(command) {
+    const commandId = command && command.id;
+    if (!commandId) return;
+    try {
+      const payload = command.payload || {};
+      let result;
+      if (command.command_type === 'chat_message') {
+        result = await this.handleCommandPayload({ t: 'chat_message', ...payload }, { waitForDone: true });
+      } else if (command.command_type === 'list_sessions') {
+        result = await this.handleSessionsPayload({ t: 'list_sessions' });
+      } else if (command.command_type === 'history') {
+        result = await this.handleHistoryPayload({ t: 'history', ...payload });
+      } else if (command.command_type === 'new_session') {
+        result = await this.handleNewSessionPayload({ t: 'new_session' });
+      } else if (command.command_type === 'list_files') {
+        result = await this.handleFilesPayload({ t: 'list_files' }, this.backendBaseUrl());
+      } else {
+        throw new Error(`不支持的公网远程命令：${command.command_type}`);
+      }
+      await this.backendJson(`/api/remote/machine/commands/${encodeURIComponent(commandId)}/result`, {
+        method: 'POST',
+        machine: true,
+        body: { ok: true, result },
+      });
+    } catch (e) {
+      await this.backendJson(`/api/remote/machine/commands/${encodeURIComponent(commandId)}/result`, {
+        method: 'POST',
+        machine: true,
+        body: { ok: false, error: (e && e.message) || String(e), result: {} },
+      }).catch(() => {});
+    }
+  }
+
   async start() {
     if (this.running || !this.isLoggedIn()) return;
     this.running = true;
     this.emitState();
     try {
       await this.ensureServer();
+      await this.ensureMachineRegistration().catch((e) => {
+        this.lastError = `公网中继未连接：${(e && e.message) || e}`;
+      });
+      this.startRelayLoops();
       await this.refreshPairing();
-      this.lastError = '';
+      if (this.relayEnabled) this.lastError = '';
       this.emitState();
     } catch (e) {
       this.running = false;
@@ -972,10 +1170,12 @@ class RemoteHost extends EventEmitter {
 
   async stop() {
     this.running = false;
+    this.stopRelayLoops();
     await this.closeServer();
     this.detachEngineListeners();
     this.remoteTurns.clear();
     this.clearFileShares();
+    this.cloudFiles.clear();
     this.emitState();
   }
 
@@ -1016,30 +1216,59 @@ class RemoteHost extends EventEmitter {
     if (!this.server) await this.ensureServer();
     const urls = networkUrls(this.port);
     const baseUrl = urls[0] || `http://127.0.0.1:${this.port}`;
-    const code = randomCode();
+    let code = randomCode();
     const key = crypto.randomBytes(32);
     const expiresAtMs = Date.now() + PAIRING_TTL_MS;
     const url = new URL('/remote', baseUrl);
     url.searchParams.set('code', code);
     url.hash = `k=${base64url(key)}`;
+    let mode = 'direct-encrypted';
+    let qrText = url.toString();
+    let payloadUrl = url.toString();
+    let relaySessionId = '';
+    if (this.relayEnabled && this.machineToken && this.userToken()) {
+      try {
+        const created = await this.backendJson(`/api/remote/machines/${encodeURIComponent(this.machineId)}/pairing`, {
+          method: 'POST',
+          body: {
+            mode: 'relay-encrypted',
+            client_key: base64url(key),
+            direct_url: baseUrl,
+            direct_urls: urls,
+          },
+        });
+        code = created.code || code;
+        relaySessionId = created.relay_session_id || '';
+        qrText = (created.payload && created.payload.web_url) || qrText;
+        payloadUrl = qrText;
+        mode = 'relay-encrypted';
+      } catch (e) {
+        this.lastError = `公网中继配对失败，已回退局域网直连：${(e && e.message) || e}`;
+      }
+    }
+    const finalUrl = new URL(`${String(baseUrl).replace(/\/+$/, '')}/remote`);
+    finalUrl.searchParams.set('code', code);
+    finalUrl.hash = `k=${base64url(key)}`;
     this.pairing = {
       code,
       key,
       expiresAtMs,
       expiresAt: new Date(expiresAtMs).toISOString(),
       payload: {
-        version: 2,
+        version: mode === 'relay-encrypted' ? 3 : 2,
         product: 'deskagent',
-        mode: 'direct-encrypted',
+        mode,
         code,
         machine_id: this.machineId,
-        url: url.toString(),
+        relay_session_id: relaySessionId,
+        url: payloadUrl,
+        direct_url: finalUrl.toString(),
         urls,
         crypto: 'xsalsa20-poly1305',
       },
-      qrText: url.toString(),
-      rawPayloadText: JSON.stringify({ url: url.toString(), code, mode: 'direct-encrypted' }),
-      qrDataUrl: await QRCode.toDataURL(url.toString(), {
+      qrText,
+      rawPayloadText: JSON.stringify({ url: payloadUrl, code, mode }),
+      qrDataUrl: await QRCode.toDataURL(qrText, {
         margin: 1,
         width: 220,
         errorCorrectionLevel: 'M',
@@ -1246,6 +1475,7 @@ class RemoteHost extends EventEmitter {
 
   publicShare(share, baseUrl = '') {
     const downloadPath = share.downloadPath;
+    const cloudFile = share.cloudFile || null;
     return {
       id: share.token,
       token: share.token,
@@ -1257,7 +1487,11 @@ class RemoteHost extends EventEmitter {
       source_count: share.sourceCount || 1,
       entry_count: share.entryCount || 1,
       download_path: downloadPath,
-      download_url: baseUrl ? new URL(downloadPath, baseUrl).toString() : downloadPath,
+      download_url: (cloudFile && cloudFile.download_url)
+        || (baseUrl ? new URL(downloadPath, baseUrl).toString() : downloadPath),
+      cloud_file_id: cloudFile && cloudFile.id,
+      cloud_download_url: cloudFile && cloudFile.download_url,
+      download_scope: cloudFile && cloudFile.download_url ? (cloudFile.large_file ? 'lan' : 'public') : 'lan',
     };
   }
 
@@ -1266,6 +1500,18 @@ class RemoteHost extends EventEmitter {
     return [...this.fileShares.values()]
       .sort((a, b) => b.createdAtMs - a.createdAtMs)
       .map((share) => this.publicShare(share, baseUrl));
+  }
+
+  pushFilesChangedEvent() {
+    const files = this.publicShares(this.directBaseUrl());
+    for (const turn of this.remoteTurns.values()) {
+      if (turn.done) continue;
+      this.pushRemoteEvent(turn, {
+        type: 'files_changed',
+        thread_id: turn.threadId,
+        files,
+      });
+    }
   }
 
   async sharePaths(inputPaths) {
@@ -1288,8 +1534,53 @@ class RemoteHost extends EventEmitter {
       downloadPath,
     };
     this.fileShares.set(token, share);
+    await this.syncShareToCloud(share).catch((e) => {
+      this.lastError = `文件公网链接生成失败：${(e && e.message) || e}`;
+    });
+    this.pushFilesChangedEvent();
     this.emitState();
-    return { ok: true, share: this.publicShare(share, this.directBaseUrl()), state: this.info() };
+    return {
+      ok: true,
+      message: '已发送到远程手机端文件列表',
+      share: this.publicShare(share, this.directBaseUrl()),
+      state: this.info(),
+    };
+  }
+
+  async syncShareToCloud(share) {
+    if (!this.relayEnabled || !this.machineToken || !share || share.cloudFile) return null;
+    const directUrl = new URL(share.downloadPath, this.directBaseUrl()).toString();
+    let body = {
+      name: share.name,
+      size: share.size,
+      content_type: contentTypeFor(share.name),
+      direct_url: directUrl,
+      packaged: !!share.packaged,
+      source_count: share.sourceCount || 1,
+      entry_count: share.entryCount || 1,
+      expires_at: share.expiresAt,
+    };
+    if (share.size <= RELAY_FILE_INLINE_MAX_BYTES) {
+      body = {
+        ...body,
+        content_base64: fs.readFileSync(share.filePath).toString('base64'),
+        direct_url: directUrl,
+      };
+    }
+    const uploaded = await this.backendJson('/api/remote/machine/files', {
+      method: 'POST',
+      machine: true,
+      body,
+    });
+    share.cloudFile = {
+      ...(uploaded.file || {}),
+      download_url: uploaded.file && uploaded.file.id
+        ? backendUrlFor(this.backendBaseUrl(), `/api/remote/files/${encodeURIComponent(uploaded.file.id)}/${encodeURIComponent(share.name)}`)
+        : '',
+      large_file: share.size > RELAY_FILE_INLINE_MAX_BYTES,
+    };
+    this.cloudFiles.set(share.token, share.cloudFile);
+    return share.cloudFile;
   }
 
   pruneRemoteTurns() {
@@ -1494,7 +1785,7 @@ class RemoteHost extends EventEmitter {
     }
   }
 
-  async handleCommandPayload(payload) {
+  async handleCommandPayload(payload, options = {}) {
     if (!payload || payload.t !== 'chat_message') throw new Error('不支持的远程命令');
     const engine = this.ensureEngine();
     const text = String(payload.text || payload.prompt || '').trim();
@@ -1531,6 +1822,16 @@ class RemoteHost extends EventEmitter {
           stale_thread_id: threadId,
           recovered: !!result.recovered,
         });
+      }
+      if (options.waitForDone) {
+        await waitForRemoteTurnDone(this, turn, options.timeoutMs);
+        return {
+          t: 'completed',
+          turn_id: turnId,
+          thread_id: turn.threadId,
+          done: turn.done,
+          events: turn.events,
+        };
       }
       return {
         t: 'accepted',
