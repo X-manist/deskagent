@@ -253,6 +253,7 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
     .await?;
 
     let mut allowed_models = Vec::<String>::new();
+    let mut points_remaining_micros = 0i64;
     let entitlements: Vec<serde_json::Value> = ents
         .into_iter()
         .map(|(id, model, points, models_json, used, exp)| {
@@ -261,6 +262,8 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
             let remaining_points = meter::display_points_from_micros(remaining_micros);
             let used_points = meter::display_used_points(used);
             if remaining_micros > 0 {
+                points_remaining_micros =
+                    points_remaining_micros.saturating_add(remaining_micros);
                 allowed_models.extend(models.iter().cloned());
             }
             json!({
@@ -301,14 +304,7 @@ async fn me_payload(st: &AppState, uid: i64) -> AppResult<serde_json::Value> {
             })
         })
         .collect::<Vec<_>>();
-    let points_remaining: i64 = entitlements
-        .iter()
-        .map(|item| {
-            item.get("points_remaining")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0)
-        })
-        .sum();
+    let points_remaining = meter::display_points_from_micros(points_remaining_micros);
 
     Ok(json!({
         "id": uid,

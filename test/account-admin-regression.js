@@ -58,8 +58,9 @@ assert(adminApp.includes('created.entitlement'), 'admin UI displays created enti
 assert(adminApp.includes('积分余额'), 'admin users table shows membership points');
 assert(adminApp.includes('可用模型额度'), 'admin users table shows entitlement models');
 assert(adminApp.includes("useState('100')"), 'admin test-user default is 100 integer points');
+assert(adminApp.includes('function formatPoints'), 'admin UI formats points as integer display values');
 assert(adminApp.includes('积分/百万 token'), 'admin model pricing uses million-token point units');
-assert(adminApp.includes('1 RMB = 100 积分'), 'admin package form documents RMB-to-points mapping');
+assert(adminApp.includes('1 元 = 100 积分'), 'admin package form documents yuan-to-points mapping');
 assert(adminApp.includes('6 位精度'), 'admin model pricing explains precise internal metering');
 
 const adminRoutes = read('server/src/routes/admin.rs');
@@ -70,6 +71,7 @@ assert(adminRoutes.includes('display_points_from_micros(point_micros_remaining)'
 
 const userRoutes = read('server/src/routes/user.rs');
 assert(userRoutes.includes('points_used_micros'), 'user API preserves precise metering for diagnostics');
+assert(userRoutes.includes('points_remaining_micros'), 'user API aggregates remaining balance before integer display');
 assert(userRoutes.includes('display_points_from_micros(remaining_micros)'), 'user API returns integer remaining points');
 
 const rendererHtml = read('app/src/renderer/index.html');

@@ -182,7 +182,7 @@ async fn remote_pairing_and_command_flow() {
     assert_eq!(code.len(), 8);
     let web_url = pairing["payload"]["web_url"].as_str().unwrap();
     assert!(
-        web_url.contains(&format!("/remote?code={code}#k=")),
+        web_url.contains(&format!("/api/remote/web?code={code}#k=")),
         "{web_url}"
     );
     assert_eq!(
@@ -214,7 +214,7 @@ async fn remote_pairing_and_command_flow() {
         .as_str()
         .unwrap()
         .starts_with(&format!(
-            "https://admin-deskagent.example.test/relay-e2e/remote?code={prefixed_code}#k="
+            "https://admin-deskagent.example.test/relay-e2e/api/remote/web?code={prefixed_code}#k="
         )));
     assert_eq!(
         prefixed_pairing["payload"]["server_url"].as_str().unwrap(),
@@ -224,12 +224,19 @@ async fn remote_pairing_and_command_flow() {
     let (status, prefixed_html) = text_request_with_headers(
         &app,
         Method::GET,
-        &format!("/remote?code={prefixed_code}"),
+        &format!("/api/remote/web?code={prefixed_code}"),
         &[("x-forwarded-prefix", "/relay-e2e")],
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(prefixed_html.contains("const apiBase = \"/relay-e2e\""));
+
+    let (status, api_html) =
+        text_request(&app, Method::GET, &format!("/api/remote/web?code={code}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(api_html.contains("智界助手远程连接"));
+    assert!(api_html.contains(&format!("const initialCode = \"{code}\"")));
+    assert!(api_html.contains("/api/remote/relay/pairings/"));
 
     let (status, html) = text_request(&app, Method::GET, &format!("/remote?code={code}")).await;
     assert_eq!(status, StatusCode::OK);

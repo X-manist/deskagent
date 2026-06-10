@@ -71,6 +71,7 @@ pub fn router() -> Router<AppState> {
             "/api/remote/files/{file_id}",
             get(download_relay_file_plain),
         )
+        .route("/api/remote/web", get(remote_web_page))
         .route("/remote", get(remote_web_page))
 }
 
@@ -456,7 +457,7 @@ async fn create_pairing(
     let web_url = req
         .web_url
         .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| format!("{server_url}/remote?code={code}#k={client_key}"));
+        .unwrap_or_else(|| format!("{server_url}/api/remote/web?code={code}#k={client_key}"));
     let payload = json!({
         "version": 3,
         "product": "deskagent",

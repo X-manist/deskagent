@@ -77,6 +77,12 @@ function modelSummary(ids) {
   return list.length ? list.join(', ') : '-';
 }
 
+function formatPoints(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return '0';
+  return Math.round(n).toLocaleString();
+}
+
 function ModelCheckboxes({ models, value, onChange, disabled }) {
   const selected = new Set(Array.isArray(value) ? value : []);
   const fallbackId = value && value[0] ? value[0] : 'glm-5.1';
@@ -112,7 +118,7 @@ function EntitlementSummary({ user }) {
       {items.map((item) => (
         <div key={item.id || item.model}>
           <span>{modelSummary(item.models || [item.model])}</span>
-          <strong>{Number(item.points_remaining || 0).toLocaleString()}</strong>
+          <strong>{formatPoints(item.points_remaining)}</strong>
         </div>
       ))}
     </div>
@@ -133,7 +139,7 @@ function Dashboard() {
       <Stat label="今日新增" value={s.users_new_today} />
       <Stat label="付费订单" value={s.orders_paid} />
       <Stat label="累计收入(元)" value={s.revenue_yuan} />
-      <Stat label="累计消耗积分" value={Number(s.points_used_total || 0).toLocaleString()} />
+      <Stat label="累计消耗积分" value={formatPoints(s.points_used_total)} />
       <Stat label="累计模型 Token" value={s.tokens_total} />
     </div>
   );
@@ -207,7 +213,7 @@ function Users() {
           <div className="notice">
             <div>已创建/刷新测试用户：{created.user.phone}</div>
             {created.entitlement && (
-              <div>测试积分：{created.entitlement.points_remaining.toLocaleString()} / {created.entitlement.points.toLocaleString()}，模型 {modelSummary(created.entitlement.models)}，有效期至 {created.entitlement.expires_at}</div>
+              <div>测试积分：{formatPoints(created.entitlement.points_remaining)} / {formatPoints(created.entitlement.points)}，模型 {modelSummary(created.entitlement.models)}，有效期至 {created.entitlement.expires_at}</div>
             )}
             <textarea readOnly value={created.token} />
           </div>
@@ -223,9 +229,9 @@ function Users() {
           {list.map((u) => (
             <tr key={u.id}>
               <td>{u.id}</td><td>{u.phone}</td>
-              <td>{Number(u.points_remaining || 0).toLocaleString()}</td>
+              <td>{formatPoints(u.points_remaining)}</td>
               <td><EntitlementSummary user={u} /></td>
-              <td>{u.tokens}</td><td>{Number(u.points_used || 0).toLocaleString()}</td><td>{u.spent_yuan}</td>
+              <td>{u.tokens}</td><td>{formatPoints(u.points_used)}</td><td>{u.spent_yuan}</td>
               <td>{u.created_at}</td><td>{u.last_login_at || '-'}</td>
             </tr>
           ))}
@@ -282,12 +288,20 @@ function PackageModal({ initial, models, defaultModel, onClose, onSaved }) {
   const save = async () => {
     setErr(''); setSaving(true);
     try {
+      const points = Number(p.points || p.total_tokens);
+      const priceCents = Number(p.price_cents);
+      const durationDays = Number(p.duration_days);
+      const sortOrder = Number(p.sort_order);
+      if (!Number.isSafeInteger(points) || points <= 0) throw new Error('套餐积分数必须是正整数');
+      if (!Number.isSafeInteger(priceCents) || priceCents < 0) throw new Error('价格必须是非负整数分');
+      if (!Number.isSafeInteger(durationDays) || durationDays <= 0) throw new Error('有效天数必须是正整数');
+      if (!Number.isSafeInteger(sortOrder)) throw new Error('排序必须是整数');
       const body = {
         name: p.name,
         models: Array.isArray(p.models) && p.models.length ? p.models : [defaultModel || (models[0] && models[0].id) || 'glm-5.1'],
-        points: Number(p.points || p.total_tokens),
-        price_cents: Number(p.price_cents),
-        duration_days: Number(p.duration_days), active: !!p.active, sort_order: Number(p.sort_order),
+        points,
+        price_cents: priceCents,
+        duration_days: durationDays, active: !!p.active, sort_order: sortOrder,
       };
       if (p.id) await api(`/admin/api/packages/${p.id}`, { method: 'PUT', body });
       else await api('/admin/api/packages', { method: 'POST', body });
@@ -300,12 +314,12 @@ function PackageModal({ initial, models, defaultModel, onClose, onSaved }) {
         <h2>{p.id ? '编辑套餐' : '新建套餐'}</h2>
         <div className="field"><label>名称</label><input value={p.name} onChange={(e) => set('name', e.target.value)} /></div>
         <div className="field"><label>可用模型</label><ModelCheckboxes models={models} value={p.models || [p.model || defaultModel]} onChange={(value) => set('models', value)} /></div>
-        <div className="field"><label>积分数（1 RMB = 100 积分）</label><input type="number" min="1" step="1" value={p.points || p.total_tokens} onChange={(e) => set('points', e.target.value)} /></div>
-        <div className="field"><label>价格(分)</label><input type="number" value={p.price_cents} onChange={(e) => set('price_cents', e.target.value)} /></div>
-        <div className="field"><label>有效天数</label><input type="number" value={p.duration_days} onChange={(e) => set('duration_days', e.target.value)} /></div>
+        <div className="field"><label>积分数（1 元 = 100 积分，价格分值通常等于积分数）</label><input type="number" min="1" step="1" value={p.points || p.total_tokens} onChange={(e) => set('points', e.target.value)} /></div>
+        <div className="field"><label>价格(分)</label><input type="number" min="0" step="1" value={p.price_cents} onChange={(e) => set('price_cents', e.target.value)} /></div>
+        <div className="field"><label>有效天数</label><input type="number" min="1" step="1" value={p.duration_days} onChange={(e) => set('duration_days', e.target.value)} /></div>
         <div className="row">
           <label><input type="checkbox" checked={p.active} onChange={(e) => set('active', e.target.checked)} /> 上架</label>
-          <div className="field" style={{ flex: 1 }}><label>排序</label><input type="number" value={p.sort_order} onChange={(e) => set('sort_order', e.target.value)} /></div>
+          <div className="field" style={{ flex: 1 }}><label>排序</label><input type="number" step="1" value={p.sort_order} onChange={(e) => set('sort_order', e.target.value)} /></div>
         </div>
         {err && <div className="err">{err}</div>}
         <div className="row">
@@ -336,7 +350,7 @@ function Packages() {
         <tbody>
           {list.map((p) => (
             <tr key={p.id}>
-              <td>{p.id}</td><td>{p.name}</td><td>{modelSummary(p.models || [p.model])}</td><td>{Number(p.points || p.total_tokens).toLocaleString()}</td>
+              <td>{p.id}</td><td>{p.name}</td><td>{modelSummary(p.models || [p.model])}</td><td>{formatPoints(p.points || p.total_tokens)}</td>
               <td>{(p.price_cents / 100).toFixed(2)}</td><td>{p.duration_days}</td>
               <td>{p.active ? '上架' : '下架'}</td>
               <td><button className="ghost" onClick={() => setEditing(p)}>编辑</button></td>

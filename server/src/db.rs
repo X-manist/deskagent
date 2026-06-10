@@ -260,7 +260,7 @@ async fn normalize_legacy_point_pricing_once(pool: &SqlitePool) -> Result<()> {
 
     let mut tx = pool.begin().await?;
     // Old package rows stored token allowances as points. In the new display
-    // model, 1 RMB = 100 integer points, so cents map directly to points.
+    // model, 1 yuan = 100 integer points, so cents map directly to points.
     sqlx::query(
         "UPDATE packages
          SET points = price_cents,

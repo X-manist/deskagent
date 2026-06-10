@@ -45,7 +45,7 @@ async function main() {
             expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
             payload: {
               mode: 'relay-encrypted',
-              web_url: `${baseUrlValue}/relay-e2e/remote?code=${pairingCode}#k=${body.client_key}`,
+              web_url: `${baseUrlValue}/relay-e2e/api/remote/web?code=${pairingCode}#k=${body.client_key}`,
             },
           });
         }
@@ -102,7 +102,7 @@ async function main() {
     assert(received.paths.some((p) => p === '/relay-e2e/api/remote/machines'), 'backend prefix is preserved');
     assert.strictEqual(host.info().pairing.code, pairingCode);
     assert.strictEqual(host.info().pairing.payload.mode, 'relay-encrypted');
-    assert(host.info().pairing.qrText.includes('/relay-e2e/remote?code=RELAY123'), 'relay web url keeps prefix');
+    assert(host.info().pairing.qrText.includes('/relay-e2e/api/remote/web?code=RELAY123'), 'relay web url uses API-routed remote page and keeps prefix');
 
     queue.push({
       id: 'cmd-1',
