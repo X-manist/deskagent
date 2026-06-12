@@ -19,8 +19,9 @@ use crate::state::AppState;
 
 const MACHINE_TOKEN_PREFIX: &str = "da_machine_";
 const MAX_REMOTE_COMMANDS_PER_POLL: i64 = 8;
-const RELAY_PAIRING_TTL_HOURS: i64 = 24;
+const RELAY_PAIRING_TTL_DAYS: i64 = 7;
 const RELAY_SESSION_TTL_DAYS: i64 = 30;
+const RELAY_FILE_TTL_HOURS: i64 = 24;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -414,7 +415,7 @@ async fn create_pairing(
         for _ in 0..12 {
             let candidate = new_pairing_code();
             let clash: Option<i64> = sqlx::query_scalar(
-                "SELECT 1 FROM remote_pairings WHERE code = ? AND consumed_at IS NULL AND expires_at > datetime('now')",
+                "SELECT 1 FROM remote_pairings WHERE code = ? AND consumed_at IS NULL AND datetime(expires_at) > datetime('now')",
             )
             .bind(&candidate)
             .fetch_optional(&st.db)
@@ -427,8 +428,10 @@ async fn create_pairing(
         picked.ok_or_else(|| AppError::internal("无法生成连接码"))?
     };
     let pairing_id = crypto::new_uuid();
-    let expires_at = (Utc::now() + Duration::hours(RELAY_PAIRING_TTL_HOURS)).to_rfc3339();
-    let relay_expires_at = (Utc::now() + Duration::days(RELAY_SESSION_TTL_DAYS)).to_rfc3339();
+    let created_at = Utc::now();
+    let created_at_text = created_at.to_rfc3339();
+    let expires_at = (created_at + Duration::days(RELAY_PAIRING_TTL_DAYS)).to_rfc3339();
+    let relay_expires_at = (created_at + Duration::days(RELAY_SESSION_TTL_DAYS)).to_rfc3339();
     let relay_session_id = crypto::new_uuid();
     let client_key = req
         .client_key
@@ -475,8 +478,18 @@ async fn create_pairing(
     });
 
     sqlx::query(
-        "INSERT INTO remote_pairings (id, code, user_id, machine_id, payload_json, expires_at, relay_session_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "UPDATE remote_relay_sessions
+         SET revoked_at = datetime('now')
+         WHERE user_id = ? AND machine_id = ? AND status = 'pending' AND revoked_at IS NULL",
+    )
+    .bind(user.0.sub)
+    .bind(&machine_id)
+    .execute(&st.db)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO remote_pairings (id, code, user_id, machine_id, payload_json, expires_at, relay_session_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&pairing_id)
     .bind(&code)
@@ -485,6 +498,7 @@ async fn create_pairing(
     .bind(payload.to_string())
     .bind(&expires_at)
     .bind(&relay_session_id)
+    .bind(&created_at_text)
     .execute(&st.db)
     .await?;
 
@@ -509,6 +523,7 @@ async fn create_pairing(
         "pairing_id": pairing_id,
         "relay_session_id": relay_session_id,
         "code": code,
+        "created_at": created_at_text,
         "expires_at": expires_at,
         "relay_expires_at": relay_expires_at,
         "machine_key": machine_key,
@@ -526,7 +541,7 @@ async fn read_pairing(
         "SELECT p.machine_id, p.payload_json, p.expires_at, m.last_seen_at
          FROM remote_pairings p
          JOIN remote_machines m ON m.id = p.machine_id
-         WHERE p.code = ? AND p.user_id = ? AND p.consumed_at IS NULL AND p.expires_at > datetime('now')",
+         WHERE p.code = ? AND p.user_id = ? AND p.consumed_at IS NULL AND datetime(p.expires_at) > datetime('now')",
     )
     .bind(&code)
     .bind(user.0.sub)
@@ -553,7 +568,7 @@ async fn consume_pairing(
     let row: Option<(String, String, String)> = sqlx::query_as(
         "SELECT p.id, p.machine_id, p.payload_json
          FROM remote_pairings p
-         WHERE p.code = ? AND p.user_id = ? AND p.consumed_at IS NULL AND p.expires_at > datetime('now')",
+         WHERE p.code = ? AND p.user_id = ? AND p.consumed_at IS NULL AND datetime(p.expires_at) > datetime('now')",
     )
     .bind(&code)
     .bind(user.0.sub)
@@ -662,6 +677,10 @@ struct HeartbeatReq {
     status: Option<String>,
     #[serde(default)]
     metadata: serde_json::Value,
+    #[serde(default)]
+    pairing_code: Option<String>,
+    #[serde(default)]
+    relay_session_id: Option<String>,
 }
 
 async fn machine_heartbeat(
@@ -681,7 +700,80 @@ async fn machine_heartbeat(
     .bind(&machine_id)
     .execute(&st.db)
     .await?;
-    Ok(Json(json!({ "ok": true, "machine_id": machine_id })))
+
+    if let Some(session_id) = req
+        .relay_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sqlx::query(
+            "UPDATE remote_relay_sessions
+             SET last_machine_at = datetime('now')
+             WHERE id = ? AND machine_id = ? AND revoked_at IS NULL",
+        )
+        .bind(session_id)
+        .bind(&machine_id)
+        .execute(&st.db)
+        .await?;
+    }
+
+    let pairing = if let Some(code) = req
+        .pairing_code
+        .as_deref()
+        .map(sanitize_code)
+        .filter(|value| !value.is_empty())
+    {
+        let row: Option<(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT p.code, p.created_at, p.expires_at, p.consumed_at,
+                    s.id, s.connected_at, s.last_client_at
+             FROM remote_pairings p
+             LEFT JOIN remote_relay_sessions s ON s.id = p.relay_session_id
+             WHERE p.code = ? AND p.machine_id = ? AND datetime(p.expires_at) > datetime('now')
+               AND (s.id IS NULL OR s.revoked_at IS NULL)
+             ORDER BY p.created_at DESC
+             LIMIT 1",
+        )
+        .bind(&code)
+        .bind(&machine_id)
+        .fetch_optional(&st.db)
+        .await?;
+        row.map(
+            |(
+                code,
+                created_at,
+                expires_at,
+                consumed_at,
+                relay_session_id,
+                connected_at,
+                last_client_at,
+            )| {
+                json!({
+                    "code": code,
+                    "created_at": created_at,
+                    "expires_at": expires_at,
+                    "consumed_at": consumed_at,
+                    "relay_session_id": relay_session_id,
+                    "connected_at": connected_at,
+                    "last_client_at": last_client_at,
+                })
+            },
+        )
+    } else {
+        None
+    };
+
+    Ok(Json(
+        json!({ "ok": true, "machine_id": machine_id, "pairing": pairing }),
+    ))
 }
 
 async fn machine_poll_commands(
@@ -844,7 +936,7 @@ async fn machine_upload_file(
     let expires_at = req
         .expires_at
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| (Utc::now() + Duration::hours(RELAY_PAIRING_TTL_HOURS)).to_rfc3339());
+        .unwrap_or_else(|| (Utc::now() + Duration::hours(RELAY_FILE_TTL_HOURS)).to_rfc3339());
     let content_type = req
         .content_type
         .as_deref()
@@ -906,7 +998,7 @@ async fn list_remote_files(
                     CASE WHEN content IS NULL AND direct_url IS NOT NULL THEN 1 ELSE 0 END AS large_file,
                     created_at, expires_at
              FROM remote_files
-             WHERE user_id = ? AND machine_id = ? AND expires_at > datetime('now')
+             WHERE user_id = ? AND machine_id = ? AND datetime(expires_at) > datetime('now')
              ORDER BY created_at DESC
              LIMIT 50",
         )
@@ -955,7 +1047,7 @@ async fn download_file_by_id(st: &AppState, file_id: &str) -> AppResult<Response
     let row: Option<(String, String, i64, Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
         "SELECT name, content_type, size, content, direct_url
          FROM remote_files
-         WHERE id = ? AND expires_at > datetime('now')",
+         WHERE id = ? AND datetime(expires_at) > datetime('now')",
     )
     .bind(file_id)
     .fetch_optional(&st.db)
@@ -1002,7 +1094,7 @@ async fn relay_session_machine(st: &AppState, session_id: &str) -> AppResult<(i6
     let row: Option<(i64, String)> = sqlx::query_as(
         "SELECT user_id, machine_id
          FROM remote_relay_sessions
-         WHERE id = ? AND status = 'connected' AND revoked_at IS NULL AND expires_at > datetime('now')",
+         WHERE id = ? AND status = 'connected' AND revoked_at IS NULL AND datetime(expires_at) > datetime('now')",
     )
     .bind(session_id)
     .fetch_optional(&st.db)
@@ -1025,9 +1117,12 @@ async fn connect_relay_pairing(
         .to_string();
     let row: Option<(String, i64, String, String, String, Option<String>, String, String, String)> =
         sqlx::query_as(
-            "SELECT id, user_id, machine_id, client_key, machine_key, direct_url, direct_urls_json, expires_at, status
-             FROM remote_relay_sessions
-             WHERE code = ? AND revoked_at IS NULL AND expires_at > datetime('now')",
+            "SELECT s.id, s.user_id, s.machine_id, s.client_key, s.machine_key, s.direct_url, s.direct_urls_json, s.expires_at, s.status
+             FROM remote_relay_sessions s
+             JOIN remote_pairings p ON p.relay_session_id = s.id
+             WHERE s.code = ? AND s.revoked_at IS NULL
+               AND datetime(s.expires_at) > datetime('now')
+               AND datetime(p.expires_at) > datetime('now')",
         )
         .bind(&code)
         .fetch_optional(&st.db)
@@ -1155,7 +1250,7 @@ async fn list_relay_files(
                     CASE WHEN content IS NULL AND direct_url IS NOT NULL THEN 1 ELSE 0 END AS large_file,
                     created_at, expires_at
              FROM remote_files
-             WHERE user_id = ? AND machine_id = ? AND expires_at > datetime('now')
+             WHERE user_id = ? AND machine_id = ? AND datetime(expires_at) > datetime('now')
              ORDER BY created_at DESC
              LIMIT 50",
         )

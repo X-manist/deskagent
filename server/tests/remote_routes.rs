@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::routing::get;
 use axum::Router;
+use chrono::Utc;
 use deskagent_server::auth::issue_user_token;
 use deskagent_server::config::Config;
 use deskagent_server::db;
@@ -190,10 +191,68 @@ async fn remote_pairing_and_command_flow() {
         "relay-encrypted"
     );
     assert!(pairing["relay_session_id"].as_str().unwrap().len() > 20);
+    assert!(pairing["created_at"].as_str().unwrap().contains('T'));
+    let expires_at = chrono::DateTime::parse_from_rfc3339(pairing["expires_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&Utc);
+    let ttl_hours = (expires_at - Utc::now()).num_hours();
+    assert!(
+        (6 * 24..=7 * 24).contains(&ttl_hours),
+        "expected relay pairing TTL near 7 days, got {ttl_hours} hours"
+    );
     assert_eq!(
         pairing["payload"]["server_url"].as_str().unwrap(),
         "http://127.0.0.1:8787"
     );
+
+    let (status, api_html) =
+        text_request(&app, Method::GET, &format!("/api/remote/web?code={code}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(api_html.contains("智界助手远程连接"));
+    assert!(api_html.contains(&format!("const initialCode = \"{code}\"")));
+    assert!(api_html.contains("/api/remote/relay/pairings/"));
+
+    let (status, html) = text_request(&app, Method::GET, &format!("/remote?code={code}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("智界助手远程连接"));
+    assert!(html.contains(&format!("const initialCode = \"{code}\"")));
+    assert!(html.contains("/api/remote/relay/pairings/"));
+
+    let (status, relay) = json_request(
+        &app,
+        Method::POST,
+        &format!("/api/remote/relay/pairings/{code}"),
+        "",
+        json!({ "client_key": pairing["payload"]["client_key"].as_str().unwrap() }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{relay}");
+    let relay_session_id = relay["session_id"].as_str().unwrap();
+    assert_eq!(relay["machine_id"].as_str().unwrap(), machine_id);
+
+    let (status, heartbeat) = machine_request(
+        &app,
+        Method::POST,
+        "/api/remote/machine/heartbeat",
+        machine_token,
+        json!({
+            "pairing_code": code,
+            "relay_session_id": relay_session_id,
+            "metadata": { "mode": "relay-encrypted" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{heartbeat}");
+    assert_eq!(heartbeat["pairing"]["code"].as_str().unwrap(), code);
+    assert_eq!(
+        heartbeat["pairing"]["relay_session_id"].as_str().unwrap(),
+        relay_session_id
+    );
+    assert!(heartbeat["pairing"]["created_at"]
+        .as_str()
+        .unwrap()
+        .contains('T'));
+    assert!(heartbeat["pairing"]["last_client_at"].as_str().is_some());
 
     let (status, prefixed_pairing) = json_request_with_headers(
         &app,
@@ -230,31 +289,6 @@ async fn remote_pairing_and_command_flow() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(prefixed_html.contains("const apiBase = \"/relay-e2e\""));
-
-    let (status, api_html) =
-        text_request(&app, Method::GET, &format!("/api/remote/web?code={code}")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(api_html.contains("智界助手远程连接"));
-    assert!(api_html.contains(&format!("const initialCode = \"{code}\"")));
-    assert!(api_html.contains("/api/remote/relay/pairings/"));
-
-    let (status, html) = text_request(&app, Method::GET, &format!("/remote?code={code}")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("智界助手远程连接"));
-    assert!(html.contains(&format!("const initialCode = \"{code}\"")));
-    assert!(html.contains("/api/remote/relay/pairings/"));
-
-    let (status, relay) = json_request(
-        &app,
-        Method::POST,
-        &format!("/api/remote/relay/pairings/{code}"),
-        "",
-        json!({ "client_key": pairing["payload"]["client_key"].as_str().unwrap() }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{relay}");
-    let relay_session_id = relay["session_id"].as_str().unwrap();
-    assert_eq!(relay["machine_id"].as_str().unwrap(), machine_id);
 
     let (status, consumed) = json_request(
         &app,

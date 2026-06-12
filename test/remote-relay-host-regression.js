@@ -18,10 +18,11 @@ function json(res, status, body) {
 
 async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'deskagent-relay-host-'));
-  const received = { files: [], results: [], registered: null, pairings: [], paths: [] };
+  const received = { files: [], results: [], registered: null, pairings: [], heartbeats: [], paths: [] };
   const queue = [];
   let machineToken = 'machine-token-test';
-  let pairingCode = 'RELAY123';
+  const pairingCodes = ['RELAY123', 'RELAY456'];
+  let pairingIndex = 0;
   let server;
   const baseUrl = await new Promise((resolve) => {
     server = http.createServer(async (req, res) => {
@@ -38,11 +39,15 @@ async function main() {
         }
         if (req.method === 'POST' && routePath.endsWith('/pairing')) {
           received.pairings.push(body);
+          const pairingCode = pairingCodes[Math.min(pairingIndex, pairingCodes.length - 1)];
+          const relaySessionId = `relay-session-test-${pairingIndex + 1}`;
+          pairingIndex += 1;
           return json(res, 200, {
-            pairing_id: 'pairing-test',
-            relay_session_id: 'relay-session-test',
+            pairing_id: `pairing-test-${pairingIndex}`,
+            relay_session_id: relaySessionId,
             code: pairingCode,
-            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            created_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
             payload: {
               mode: 'relay-encrypted',
               web_url: `${baseUrlValue}/relay-e2e/api/remote/web?code=${pairingCode}#k=${body.client_key}`,
@@ -50,7 +55,16 @@ async function main() {
           });
         }
         if (req.method === 'POST' && routePath === '/api/remote/machine/heartbeat') {
-          return json(res, 200, { ok: true });
+          received.heartbeats.push(body);
+          const stalePairing = body.pairing_code ? {
+            code: body.pairing_code,
+            relay_session_id: body.relay_session_id,
+            created_at: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString(),
+            expires_at: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+            connected_at: null,
+            last_client_at: null,
+          } : null;
+          return json(res, 200, { ok: true, pairing: stalePairing });
         }
         if (req.method === 'GET' && routePath === '/api/remote/machine/commands') {
           return json(res, 200, { commands: queue.splice(0) });
@@ -100,9 +114,16 @@ async function main() {
     await host.start();
     assert(received.registered, 'machine is registered with backend');
     assert(received.paths.some((p) => p === '/relay-e2e/api/remote/machines'), 'backend prefix is preserved');
-    assert.strictEqual(host.info().pairing.code, pairingCode);
+    assert.strictEqual(host.info().pairing.code, 'RELAY123');
     assert.strictEqual(host.info().pairing.payload.mode, 'relay-encrypted');
     assert(host.info().pairing.qrText.includes('/relay-e2e/api/remote/web?code=RELAY123'), 'relay web url uses API-routed remote page and keeps prefix');
+    assert.strictEqual(received.pairings.length, 1, 'initial relay pairing is created');
+
+    await host.sendRelayHeartbeat();
+    assert(received.heartbeats.some((body) => body.pairing_code === 'RELAY123'), 'heartbeat carries current pairing code');
+    assert.strictEqual(received.pairings.length, 2, 'stale unused relay pairing is refreshed');
+    assert.strictEqual(host.info().pairing.code, 'RELAY456');
+    assert(host.info().pairing.qrText.includes('/relay-e2e/api/remote/web?code=RELAY456'), 'refreshed relay web url is exposed');
 
     queue.push({
       id: 'cmd-1',

@@ -9,6 +9,8 @@ const QRCode = require('qrcode');
 const nacl = require('tweetnacl');
 
 const PAIRING_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+const RELAY_PAIRING_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const RELAY_PAIRING_IDLE_REFRESH_MS = 3 * 24 * 60 * 60 * 1000;
 const FILE_SHARE_TTL_MS = 24 * 60 * 60 * 1000;
 const RELAY_FILE_INLINE_MAX_BYTES = Number(process.env.DESKAGENT_REMOTE_RELAY_FILE_MAX_BYTES || 5 * 1024 * 1024);
 const MAX_BODY_BYTES = 256 * 1024;
@@ -218,6 +220,16 @@ function encodeRfc5987(value) {
 function contentDispositionAttachment(name) {
   const fallback = asciiFilenameFallback(name).replace(/["\\]/g, '_');
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeRfc5987(name || fallback)}`;
+}
+
+function parseTimeMs(value) {
+  if (!value) return 0;
+  const ms = Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function isoFromMs(value) {
+  return Number.isFinite(value) && value > 0 ? new Date(value).toISOString() : '';
 }
 
 function contentTypeFor(name) {
@@ -992,6 +1004,7 @@ class RemoteHost extends EventEmitter {
     this.backendUrl = '';
     this.relayEnabled = false;
     this.relayLastSeenAt = '';
+    this.relayPairingRefreshBusy = false;
   }
 
   auth() {
@@ -1079,15 +1092,82 @@ class RemoteHost extends EventEmitter {
     this.relayPollTimer = null;
     this.heartbeatTimer = null;
     this.relayBusy = false;
+    this.relayPairingRefreshBusy = false;
+  }
+
+  currentRelayPairing() {
+    if (!this.pairing || !this.pairing.payload || this.pairing.payload.mode !== 'relay-encrypted') return null;
+    return this.pairing;
+  }
+
+  relayPairingLastUseMs(status) {
+    const pairing = this.currentRelayPairing();
+    if (!pairing) return 0;
+    const createdMs = parseTimeMs(status && status.created_at)
+      || parseTimeMs(pairing.createdAt)
+      || (pairing.expiresAtMs ? pairing.expiresAtMs - RELAY_PAIRING_TTL_MS : 0);
+    return Math.max(
+      parseTimeMs(status && status.last_client_at),
+      parseTimeMs(status && status.connected_at),
+      parseTimeMs(pairing.lastClientAt),
+      parseTimeMs(pairing.connectedAt),
+      createdMs,
+    );
+  }
+
+  applyRelayPairingStatus(status) {
+    const pairing = this.currentRelayPairing();
+    if (!pairing || !status) return false;
+    const code = String(status.code || '').trim().toUpperCase();
+    if (code && code !== pairing.code) return false;
+    const relaySessionId = String(status.relay_session_id || status.relaySessionId || '').trim();
+    if (relaySessionId && pairing.payload.relay_session_id && relaySessionId !== pairing.payload.relay_session_id) {
+      return false;
+    }
+    if (status.created_at) pairing.createdAt = status.created_at;
+    if (status.expires_at) {
+      pairing.expiresAt = status.expires_at;
+      const expiresAtMs = parseTimeMs(status.expires_at);
+      if (expiresAtMs) pairing.expiresAtMs = expiresAtMs;
+    }
+    if (Object.prototype.hasOwnProperty.call(status, 'connected_at')) pairing.connectedAt = status.connected_at || '';
+    if (Object.prototype.hasOwnProperty.call(status, 'last_client_at')) pairing.lastClientAt = status.last_client_at || '';
+    if (relaySessionId) pairing.payload.relay_session_id = relaySessionId;
+    const lastUseMs = this.relayPairingLastUseMs(status);
+    pairing.idleRefreshAt = isoFromMs(lastUseMs + RELAY_PAIRING_IDLE_REFRESH_MS);
+    return true;
+  }
+
+  shouldRefreshRelayPairing(status) {
+    const pairing = this.currentRelayPairing();
+    if (!pairing) return false;
+    const now = Date.now();
+    const expiresAtMs = parseTimeMs(status && status.expires_at) || pairing.expiresAtMs || 0;
+    if (expiresAtMs && expiresAtMs - now <= 5 * 60 * 1000) return true;
+    const lastUseMs = this.relayPairingLastUseMs(status);
+    return lastUseMs > 0 && now - lastUseMs >= RELAY_PAIRING_IDLE_REFRESH_MS;
+  }
+
+  async maybeRefreshIdleRelayPairing(status) {
+    if (this.relayPairingRefreshBusy || !this.shouldRefreshRelayPairing(status)) return;
+    this.relayPairingRefreshBusy = true;
+    try {
+      await this.refreshPairing();
+    } finally {
+      this.relayPairingRefreshBusy = false;
+    }
   }
 
   async sendRelayHeartbeat() {
     if (!this.relayEnabled || !this.machineToken) return;
-    await this.backendJson('/api/remote/machine/heartbeat', {
+    const pairing = this.currentRelayPairing();
+    const data = await this.backendJson('/api/remote/machine/heartbeat', {
       method: 'POST',
       machine: true,
       body: {
         status: 'active',
+        pairing_code: pairing ? pairing.code : undefined,
+        relay_session_id: pairing && pairing.payload ? pairing.payload.relay_session_id : undefined,
         metadata: {
           mode: 'relay-encrypted',
           directUrls: this.port ? networkUrls(this.port) : [],
@@ -1096,6 +1176,9 @@ class RemoteHost extends EventEmitter {
       },
     });
     this.relayLastSeenAt = new Date().toISOString();
+    const updated = this.applyRelayPairingStatus(data && data.pairing);
+    if (updated) this.emitState();
+    await this.maybeRefreshIdleRelayPairing(data && data.pairing);
   }
 
   async pollRelayCommands() {
@@ -1218,7 +1301,8 @@ class RemoteHost extends EventEmitter {
     const baseUrl = urls[0] || `http://127.0.0.1:${this.port}`;
     let code = randomCode();
     const key = crypto.randomBytes(32);
-    const expiresAtMs = Date.now() + PAIRING_TTL_MS;
+    let createdAt = new Date().toISOString();
+    let expiresAtMs = Date.now() + PAIRING_TTL_MS;
     const url = new URL('/remote', baseUrl);
     url.searchParams.set('code', code);
     url.hash = `k=${base64url(key)}`;
@@ -1239,6 +1323,8 @@ class RemoteHost extends EventEmitter {
         });
         code = created.code || code;
         relaySessionId = created.relay_session_id || '';
+        createdAt = created.created_at || createdAt;
+        expiresAtMs = parseTimeMs(created.expires_at) || (Date.now() + RELAY_PAIRING_TTL_MS);
         qrText = (created.payload && created.payload.web_url) || qrText;
         payloadUrl = qrText;
         mode = 'relay-encrypted';
@@ -1252,8 +1338,14 @@ class RemoteHost extends EventEmitter {
     this.pairing = {
       code,
       key,
+      createdAt,
       expiresAtMs,
       expiresAt: new Date(expiresAtMs).toISOString(),
+      connectedAt: '',
+      lastClientAt: '',
+      idleRefreshAt: mode === 'relay-encrypted'
+        ? isoFromMs((parseTimeMs(createdAt) || Date.now()) + RELAY_PAIRING_IDLE_REFRESH_MS)
+        : '',
       payload: {
         version: mode === 'relay-encrypted' ? 3 : 2,
         product: 'deskagent',
@@ -1944,7 +2036,11 @@ class RemoteHost extends EventEmitter {
       hasMachineToken: false,
       pairing: this.pairing ? {
         code: this.pairing.code,
+        createdAt: this.pairing.createdAt,
         expiresAt: this.pairing.expiresAt,
+        connectedAt: this.pairing.connectedAt,
+        lastClientAt: this.pairing.lastClientAt,
+        idleRefreshAt: this.pairing.idleRefreshAt,
         payload: this.pairing.payload,
         qrText: this.pairing.qrText,
         rawPayloadText: this.pairing.rawPayloadText,
@@ -1968,6 +2064,8 @@ module.exports = {
   networkUrls,
   stripThinkText,
   PAIRING_TTL_MS,
+  RELAY_PAIRING_TTL_MS,
+  RELAY_PAIRING_IDLE_REFRESH_MS,
   FILE_SHARE_TTL_MS,
   contentDispositionAttachment,
   createZipArchive,
