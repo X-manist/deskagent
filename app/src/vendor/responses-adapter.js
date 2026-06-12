@@ -64,6 +64,7 @@ function buildChatMessages(reqBody) {
       messages.push({ role: normalizeRole(item.role), content: partsToText(item.content) });
     } else if (type === 'function_call') {
       // assistant requested a tool call previously
+      const chatName = flattenToolName(item.namespace, item.name);
       messages.push({
         role: 'assistant',
         content: '',
@@ -71,7 +72,7 @@ function buildChatMessages(reqBody) {
           {
             id: item.call_id || item.id || genId('call'),
             type: 'function',
-            function: { name: item.name, arguments: item.arguments || '{}' },
+            function: { name: chatName, arguments: item.arguments || '{}' },
           },
         ],
       });
@@ -85,25 +86,83 @@ function buildChatMessages(reqBody) {
   return messages;
 }
 
+function sanitizeToolName(name) {
+  const value = String(name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (value.length <= 64) return value;
+  const hash = crypto.createHash('sha1').update(value).digest('hex').slice(0, 8);
+  return `${value.slice(0, 55)}_${hash}`;
+}
+
+function flattenToolName(namespace, name) {
+  const toolName = String(name || '').trim();
+  const ns = namespace == null ? '' : String(namespace).trim();
+  if (!ns) return sanitizeToolName(toolName);
+  return sanitizeToolName(`${ns.replace(/_+$/g, '')}__${toolName.replace(/^_+/g, '')}`);
+}
+
+function buildChatToolMap(reqBody) {
+  const tools = Array.isArray(reqBody.tools) ? reqBody.tools : [];
+  const map = new Map();
+  for (const t of tools) {
+    if (t && t.type === 'function' && t.name) {
+      const name = flattenToolName(null, t.name);
+      map.set(name, { name: t.name });
+    } else if (t && t.type === 'namespace' && t.name && Array.isArray(t.tools)) {
+      for (const child of t.tools) {
+        if (!(child && child.type === 'function' && child.name)) continue;
+        const name = flattenToolName(t.name, child.name);
+        map.set(name, { namespace: t.name, name: child.name });
+      }
+    }
+  }
+  return map;
+}
+
 function buildChatTools(reqBody) {
   const tools = Array.isArray(reqBody.tools) ? reqBody.tools : [];
   const out = [];
   for (const t of tools) {
-    // Only forward plain function tools. Runtime-specific tools such as the
-    // `namespace` multi-agent tool or the typed `web_search` tool are not
-    // understood by chat backends and would cause 400s.
+    // Chat backends do not understand Responses-native typed tools such as
+    // web_search. Namespace tools, including local MCP tools, are flattened into
+    // ordinary function names and restored before returning to the runtime.
     if (t && t.type === 'function' && t.name) {
       out.push({
         type: 'function',
         function: {
-          name: t.name,
+          name: flattenToolName(null, t.name),
           description: t.description || '',
           parameters: t.parameters || { type: 'object', properties: {} },
         },
       });
+    } else if (t && t.type === 'namespace' && t.name && Array.isArray(t.tools)) {
+      for (const child of t.tools) {
+        if (!(child && child.type === 'function' && child.name)) continue;
+        const description = [
+          t.description ? `Namespace ${t.name}: ${t.description}` : `Namespace ${t.name}`,
+          child.description || '',
+        ].filter(Boolean).join('\n');
+        out.push({
+          type: 'function',
+          function: {
+            name: flattenToolName(t.name, child.name),
+            description,
+            parameters: child.parameters || { type: 'object', properties: {} },
+          },
+        });
+      }
     }
   }
   return out;
+}
+
+function restoreChatToolCall(call, toolNameMap) {
+  const mapped = toolNameMap && toolNameMap.get(call.name);
+  if (!mapped) return call;
+  return {
+    ...call,
+    name: mapped.name,
+    namespace: mapped.namespace,
+  };
 }
 
 function buildChatRequest(reqBody, model) {
@@ -186,14 +245,16 @@ function makeResponsesWriter(res, responseId) {
       });
     },
     functionCallDone(call, index) {
+      const item = {
+        type: 'function_call',
+        name: call.name,
+        arguments: call.arguments || '{}',
+        call_id: call.id || genId('call'),
+      };
+      if (call.namespace) item.namespace = call.namespace;
       send('response.output_item.done', {
         output_index: index,
-        item: {
-          type: 'function_call',
-          name: call.name,
-          arguments: call.arguments || '{}',
-          call_id: call.id || genId('call'),
-        },
+        item,
       });
     },
     completed(usage) {
@@ -318,7 +379,7 @@ function upstreamWsUrl(baseUrl, endpoint) {
   return url;
 }
 
-function streamChatOverWebSocket(baseUrl, apiKey, body, writer, log) {
+function streamChatOverWebSocket(baseUrl, apiKey, body, writer, log, toolNameMap) {
   const url = upstreamWsUrl(baseUrl, '/chat/completions/ws');
   const mod = url.protocol === 'wss:' ? https : http;
   const key = crypto.randomBytes(16).toString('base64');
@@ -363,7 +424,9 @@ function streamChatOverWebSocket(baseUrl, apiKey, body, writer, log) {
       let idx = (hasMessage ? 1 : 0) + (hasReasoning ? 1 : 0);
       if (idx < 1) idx = 1;
       for (const c of toolCalls) {
-        if (c && (c.name || c.arguments)) writer.functionCallDone(c, idx++);
+        if (c && (c.name || c.arguments)) {
+          writer.functionCallDone(restoreChatToolCall(c, toolNameMap), idx++);
+        }
       }
       writer.completed(usage);
       try { socket.end(); } catch (_) {}
@@ -483,7 +546,7 @@ function postUpstreamResponses(baseUrl, apiKey, incomingHeaders, rawBody) {
 
 // ---- Stream translation ----------------------------------------------------
 
-async function streamTranslate(upstreamResp, writer) {
+async function streamTranslate(upstreamResp, writer, toolNameMap) {
   return new Promise((resolve) => {
     let buf = '';
     let fullText = '';
@@ -502,7 +565,9 @@ async function streamTranslate(upstreamResp, writer) {
       let idx = (hasMessage ? 1 : 0) + (hasReasoning ? 1 : 0);
       if (idx < 1) idx = 1;
       for (const c of toolCalls) {
-        if (c && (c.name || c.arguments)) writer.functionCallDone(c, idx++);
+        if (c && (c.name || c.arguments)) {
+          writer.functionCallDone(restoreChatToolCall(c, toolNameMap), idx++);
+        }
       }
       writer.completed(usage);
       resolve();
@@ -640,11 +705,12 @@ function createAdapterServer(opts) {
       const writer = makeResponsesWriter(res, responseId);
       writer.created();
       try {
+        const toolNameMap = buildChatToolMap(reqBody);
         const chatReq = buildChatRequest(reqBody, opts.model);
         log('upstream chat request', { model: chatReq.model, messages: chatReq.messages.length, tools: (chatReq.tools || []).length });
         if (opts.preferWebSocket) {
           try {
-            await streamChatOverWebSocket(opts.upstreamBaseUrl, opts.getApiKey(), chatReq, writer, log);
+            await streamChatOverWebSocket(opts.upstreamBaseUrl, opts.getApiKey(), chatReq, writer, log, toolNameMap);
             res.end();
             return;
           } catch (e) {
@@ -662,7 +728,7 @@ function createAdapterServer(opts) {
           });
           return;
         }
-        await streamTranslate(upstream, writer);
+        await streamTranslate(upstream, writer, toolNameMap);
         res.end();
       } catch (e) {
         log('adapter error', e && e.message);
@@ -674,7 +740,14 @@ function createAdapterServer(opts) {
   return server;
 }
 
-module.exports = { createAdapterServer, buildChatRequest, buildChatMessages, buildChatTools };
+module.exports = {
+  createAdapterServer,
+  buildChatRequest,
+  buildChatMessages,
+  buildChatTools,
+  buildChatToolMap,
+  flattenToolName,
+};
 
 // Allow standalone run for testing: node adapter/responses-adapter.js
 if (require.main === module) {
