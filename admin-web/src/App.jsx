@@ -1,8 +1,146 @@
 import React, { useEffect, useState } from 'react';
 import { api, getToken, setToken, clearToken } from './api.js';
 
-function Login({ onLogin }) {
-  const [username, setUsername] = useState('admin');
+function FlowDiagram() {
+  return (
+    <div className="flow-diagram" aria-label="连接流程">
+      <div><span>1</span><strong>安装登录</strong><small>下载桌面端并登录账号</small></div>
+      <i />
+      <div><span>2</span><strong>手机扫码</strong><small>打开远程连接面板扫码</small></div>
+      <i />
+      <div><span>3</span><strong>开始使用</strong><small>发任务、看进度、收文件</small></div>
+    </div>
+  );
+}
+
+function FeatureShowcase() {
+  return (
+    <section className="feature-showcase" aria-label="产品能力">
+      <div className="feature-card feature-command">
+        <span>01</span>
+        <strong>手机发指令</strong>
+        <p>不在电脑前，也能继续让桌面端处理任务。</p>
+      </div>
+      <div className="feature-card feature-work">
+        <span>02</span>
+        <strong>电脑做执行</strong>
+        <p>文件、脚本和工具都留在电脑端完成。</p>
+      </div>
+      <div className="feature-card feature-file">
+        <span>03</span>
+        <strong>结果回手机</strong>
+        <p>生成文件后直接在手机页面下载。</p>
+      </div>
+    </section>
+  );
+}
+
+function TrustStrip() {
+  return (
+    <div className="trust-strip" aria-label="服务说明">
+      <div><strong>7 天</strong><span>远程链接最长有效</span></div>
+      <div><strong>3 天</strong><span>未使用自动刷新</span></div>
+      <div><strong>100</strong><span>积分 / RMB</span></div>
+    </div>
+  );
+}
+
+function PublicHome({ onAdmin }) {
+  const showAdminEntry = !window.location.hostname.endsWith('agentsworkforyou.cn');
+  const releaseUrl = 'https://github.com/X-manist/deskagent/releases/tag/v0.1.0';
+  const downloadBase = 'https://github.com/X-manist/deskagent/releases/download/v0.1.0';
+  return (
+    <div className="public-page">
+      <header className="public-nav">
+        <div className="public-brand"><span className="public-mark">智</span><span>DeskAgent / 智界助手</span></div>
+        {showAdminEntry ? <button className="ghost light" onClick={onAdmin}>管理员入口</button> : null}
+      </header>
+      <main className="public-main">
+        <section className="public-hero">
+          <div className="hero-art" aria-hidden="true">
+            <img src="/assets/deskagent-hero-gpt-image-2-web.png" alt="" />
+          </div>
+          <div className="hero-content">
+            <p className="eyebrow">桌面智能助手</p>
+            <h1><span>DeskAgent</span><span>智界助手</span></h1>
+            <p className="hero-copy">电脑负责执行，手机负责控制和收文件。</p>
+            <div className="hero-actions">
+              <a className="primary-link" href="#download">下载桌面端</a>
+              <a className="secondary-link" href="#steps">查看连接步骤</a>
+            </div>
+          </div>
+          <div className="hero-metrics" aria-label="服务状态">
+            <div><strong>Windows</strong><span>一键安装</span></div>
+            <div><strong>Mac</strong><span>Apple Silicon</span></div>
+            <div><strong>Mobile</strong><span>扫码远程控制</span></div>
+          </div>
+        </section>
+        <section className="download-section" id="download">
+          <div className="section-head">
+            <p className="eyebrow">Download</p>
+            <h2>选择桌面端安装包</h2>
+            <p>普通用户只需要下载对应系统的安装包。</p>
+          </div>
+          <div className="download-grid">
+            <a className="download-card primary" href={`${downloadBase}/deskagent-0.1.0-setup.exe`}>
+              <span className="download-icon">Win</span>
+              <strong>Windows 安装包</strong>
+              <small>deskagent-0.1.0-setup.exe</small>
+              <b>立即下载</b>
+            </a>
+            <a className="download-card" href={`${downloadBase}/deskagent-0.1.0-arm64.dmg`}>
+              <span className="download-icon">Mac</span>
+              <strong>Mac Apple Silicon</strong>
+              <small>M 系列芯片 Mac · DMG</small>
+              <b>下载 DMG</b>
+            </a>
+            <a className="download-card" href={`${downloadBase}/deskagent-0.1.0-arm64.zip`}>
+              <span className="download-icon">Zip</span>
+              <strong>Mac 备用包</strong>
+              <small>M 系列芯片 Mac · ZIP</small>
+              <b>下载 ZIP</b>
+            </a>
+          </div>
+          <div className="release-row">
+            <a href={releaseUrl}>查看 v0.1.0 Release</a>
+            <span>不要手动下载 .blockmap 或 Source code</span>
+          </div>
+        </section>
+        <FeatureShowcase />
+        <section className="steps-section" id="steps">
+          <div className="section-head">
+            <p className="eyebrow">Remote</p>
+            <h2>三步连接手机</h2>
+            <p>在桌面端左侧“远程连接”面板扫码即可。</p>
+          </div>
+          <FlowDiagram />
+          <TrustStrip />
+        </section>
+        <section className="support-section">
+          <div>
+            <h2>连接失败怎么办</h2>
+            <p>回到桌面端重新生成二维码并扫码。不要把远程链接转发给别人。</p>
+          </div>
+          {showAdminEntry ? (
+            <div>
+              <h2>管理员后台</h2>
+              <p>后台用于创建测试用户、设置套餐积分、模型可用范围和模型积分倍率。普通用户不需要进入后台。</p>
+              <button className="secondary-button" onClick={onAdmin}>进入管理员登录</button>
+            </div>
+          ) : (
+            <div>
+              <h2>安全提醒</h2>
+              <p>手机远程页面的链接包含连接码和密钥，仅用于你自己的电脑和手机之间连接，不要转发或公开分享。</p>
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
+  );
+}
+
+function Login({ onLogin, onBack }) {
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
@@ -14,7 +152,7 @@ function Login({ onLogin }) {
       setToken(r.token);
       onLogin();
     } catch (e) {
-      setErr(e.message);
+      setErr(`${e.message}。如果你是普通用户，请返回首页下载桌面端并在桌面端登录。`);
     } finally {
       setLoading(false);
     }
@@ -23,9 +161,10 @@ function Login({ onLogin }) {
     <div className="login-wrap">
       <div className="login-card">
         <h1>DeskAgent 桌面助手 · 管理后台</h1>
+        <p className="login-note">仅管理员使用。普通用户请返回首页下载桌面端，通过桌面端登录和扫码连接手机。</p>
         <div className="field">
           <label>管理员账号</label>
-          <input value={username} onChange={(e) => setUsername(e.target.value)} />
+          <input value={username} placeholder="输入管理员账号" onChange={(e) => setUsername(e.target.value)} />
         </div>
         <div className="field">
           <label>密码</label>
@@ -34,6 +173,7 @@ function Login({ onLogin }) {
         </div>
         {err && <div className="err">{err}</div>}
         <button onClick={submit} disabled={loading}>{loading ? '登录中…' : '登录'}</button>
+        <button className="ghost" onClick={onBack}>返回用户首页</button>
       </div>
     </div>
   );
@@ -140,7 +280,7 @@ function Dashboard() {
       <Stat label="付费订单" value={s.orders_paid} />
       <Stat label="累计收入(元)" value={s.revenue_yuan} />
       <Stat label="累计消耗积分" value={formatPoints(s.points_used_total)} />
-      <Stat label="累计模型 Token" value={s.tokens_total} />
+      <Stat label="累计 token 用量（诊断）" value={s.tokens_total} />
     </div>
   );
 }
@@ -222,7 +362,7 @@ function Users() {
       <table>
         <thead>
           <tr>
-            <th>ID</th><th>手机号</th><th>积分余额</th><th>可用模型额度</th><th>模型Token</th><th>消耗积分</th><th>充值(元)</th><th>注册时间</th><th>最近登录</th>
+            <th>ID</th><th>手机号</th><th>积分余额</th><th>可用模型额度</th><th>实际 token 用量（诊断）</th><th>消耗积分</th><th>充值(元)</th><th>注册时间</th><th>最近登录</th>
           </tr>
         </thead>
         <tbody>
@@ -501,7 +641,26 @@ function Shell({ onLogout }) {
 }
 
 export default function App() {
+  const allowAdminMode = !window.location.hostname.endsWith('agentsworkforyou.cn');
   const [authed, setAuthed] = useState(!!getToken());
-  if (!authed) return <Login onLogin={() => setAuthed(true)} />;
+  const [adminMode, setAdminMode] = useState(() => allowAdminMode && window.location.hash === '#admin');
+  useEffect(() => {
+    const onHash = () => setAdminMode(allowAdminMode && window.location.hash === '#admin');
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, [allowAdminMode]);
+  const adminAuthed = allowAdminMode && authed;
+  if (!adminAuthed && !adminMode) return <PublicHome onAdmin={() => { window.location.hash = 'admin'; setAdminMode(true); }} />;
+  if (!adminAuthed) {
+    return (
+      <Login
+        onLogin={() => setAuthed(true)}
+        onBack={() => {
+          window.history.pushState('', document.title, window.location.pathname + window.location.search);
+          setAdminMode(false);
+        }}
+      />
+    );
+  }
   return <Shell onLogout={() => { clearToken(); setAuthed(false); }} />;
 }

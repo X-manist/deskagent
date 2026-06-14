@@ -1314,48 +1314,135 @@ fn remote_page_html_modern(code: Option<&str>, api_base: &str) -> String {
   <title>智界助手远程连接</title>
   <link rel="icon" href="data:," />
   <style>
-    :root { color-scheme: light dark; --bg:#f6f7fb; --surface:#fff; --soft:#eef2f7; --line:#d7deea; --text:#172033; --muted:#667085; --accent:#2563eb; --ok:#15803d; --danger:#dc2626; }
+    :root { color-scheme: light; --bg:#f5f7fb; --surface:#fff; --soft:#eef3f8; --line:#d9e1ed; --text:#172033; --muted:#667085; --accent:#2563eb; --accent-soft:#eaf1ff; --ok:#15803d; --danger:#dc2626; --warn:#b45309; --shadow:0 18px 50px rgba(24,39,75,.14); }
     * { box-sizing:border-box; }
     html, body { margin:0; min-height:100%; }
-    body { min-height:100svh; color:var(--text); background:var(--bg); font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
-    main { width:min(820px,100%); min-height:100svh; margin:0 auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
-    header { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:12px 0; }
-    h1 { margin:0; font-size:20px; line-height:1.2; }
-    .pill { padding:6px 9px; border:1px solid var(--line); border-radius:999px; color:var(--muted); background:var(--surface); font-size:12px; }
-    .panel { border:1px solid var(--line); border-radius:8px; background:var(--surface); overflow:hidden; }
-    .status { padding:10px 12px; border-bottom:1px solid var(--line); color:var(--muted); font-size:13px; line-height:1.45; }
-    .messages { flex:1; min-height:280px; max-height:55svh; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:9px; background:var(--soft); }
-    .msg { max-width:88%; padding:10px 12px; border-radius:13px; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.55; font-size:15px; }
-    .me { align-self:flex-end; color:#fff; background:var(--accent); border-bottom-right-radius:4px; }
-    .ai { align-self:flex-start; border:1px solid var(--line); background:var(--surface); border-bottom-left-radius:4px; }
-    .sys { align-self:center; color:var(--muted); background:var(--surface); border:1px solid var(--line); font-size:13px; }
-    form { display:flex; gap:8px; padding:10px; border-top:1px solid var(--line); }
-    textarea { flex:1; min-height:48px; max-height:140px; resize:vertical; padding:10px; border:1px solid var(--line); border-radius:8px; font:inherit; font-size:16px; }
-    button { min-width:72px; border:0; border-radius:8px; color:#fff; background:var(--accent); font:inherit; font-weight:700; cursor:pointer; }
+    body { min-height:100svh; color:var(--text); background:linear-gradient(180deg,#f8fbff 0%,#eef3f9 100%); font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif; }
+    button, textarea { font:inherit; }
+    button { border:0; cursor:pointer; }
     button:disabled { opacity:.55; cursor:not-allowed; }
-    .files { padding:10px; display:flex; flex-direction:column; gap:8px; }
-    .files:empty::before { content:"暂无可下载文件"; color:var(--muted); font-size:13px; }
-    .file { display:flex; justify-content:space-between; gap:10px; padding:10px; border:1px solid var(--line); border-radius:8px; color:var(--text); text-decoration:none; }
-    .file span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .file span:last-child { flex:0 0 auto; color:var(--muted); font-size:12px; }
+    .shell { width:min(1120px,100%); min-height:100svh; margin:0 auto; display:grid; grid-template-columns:260px minmax(0,1fr); background:rgba(255,255,255,.68); }
+    .sidebar { border-right:1px solid var(--line); background:#fff; padding:18px 14px; display:flex; flex-direction:column; gap:14px; }
+    .brand { display:flex; align-items:center; gap:10px; font-weight:800; font-size:18px; }
+    .mark { width:34px; height:34px; border-radius:10px; display:grid; place-items:center; color:#fff; background:linear-gradient(135deg,#2563eb,#0f766e); font-weight:900; }
+    .session-card { border:1px solid var(--line); border-radius:12px; padding:12px; background:#f8fafc; }
+    .session-title { margin:0 0 5px; font-size:14px; font-weight:750; }
+    .session-note { margin:0; color:var(--muted); font-size:12px; line-height:1.5; }
+    .side-list { display:flex; flex-direction:column; gap:8px; }
+    .side-item { padding:10px; border-radius:10px; background:#eef4ff; color:#1d4ed8; font-size:13px; font-weight:650; }
+    .side-foot { margin-top:auto; color:var(--muted); font-size:12px; line-height:1.5; }
+    .side-foot strong { color:var(--text); font-weight:750; }
+    .app { min-width:0; min-height:100svh; display:grid; grid-template-rows:auto minmax(0,1fr) auto; }
+    header { height:64px; padding:0 18px; border-bottom:1px solid var(--line); background:rgba(255,255,255,.92); backdrop-filter:blur(16px); display:flex; align-items:center; justify-content:space-between; gap:10px; position:sticky; top:0; z-index:10; }
+    h1 { margin:0; font-size:17px; line-height:1.2; }
+    .sub { display:block; margin-top:2px; color:var(--muted); font-size:12px; font-weight:500; }
+    .icon-btn { width:40px; height:40px; border-radius:12px; border:1px solid var(--line); background:#fff; color:var(--text); display:none; place-items:center; font-size:18px; }
+    .pill { flex:0 0 auto; padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--muted); background:#fff; font-size:12px; font-weight:650; }
+    .pill.ok { color:var(--ok); border-color:#bbf7d0; background:#f0fdf4; }
+    .pill.err { color:var(--danger); border-color:#fecaca; background:#fef2f2; }
+    .chat { min-height:0; overflow:auto; padding:18px; display:flex; flex-direction:column; gap:12px; }
+    .empty { margin:auto; width:min(420px,100%); padding:28px 22px; text-align:center; color:var(--muted); }
+    .chat.has-recovery .empty { margin:8px auto 0; padding-top:14px; }
+    .empty h2 { margin:0 0 8px; color:var(--text); font-size:22px; }
+    .empty p { margin:0; line-height:1.6; font-size:14px; overflow-wrap:anywhere; }
+    .recovery { width:min(520px,100%); margin:0 auto 10px; padding:14px; border:1px solid #fed7aa; border-radius:16px; background:#fff7ed; color:#7c2d12; box-shadow:0 1px 0 rgba(16,24,40,.04); }
+    .recovery.hidden { display:none; }
+    .recovery strong { display:block; color:#9a3412; font-size:15px; margin-bottom:5px; }
+    .recovery p { margin:0 0 12px; color:#9a3412; font-size:13px; line-height:1.55; overflow-wrap:anywhere; }
+    .recovery-actions { display:flex; flex-wrap:wrap; gap:8px; }
+    .recovery button, .recovery a { min-height:44px; border-radius:10px; padding:8px 11px; display:inline-flex; align-items:center; justify-content:center; color:#1f2937; background:#fff; border:1px solid #fdba74; text-decoration:none; font-size:13px; font-weight:700; }
+    .msg { max-width:min(76%,620px); padding:11px 13px; border-radius:16px; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.55; font-size:15px; box-shadow:0 1px 0 rgba(16,24,40,.04); }
+    .me { align-self:flex-end; color:#fff; background:var(--accent); border-bottom-right-radius:5px; }
+    .ai { align-self:flex-start; border:1px solid var(--line); background:#fff; border-bottom-left-radius:5px; }
+    .sys { align-self:center; max-width:min(86%,520px); color:var(--muted); background:#fff; border:1px solid var(--line); font-size:13px; text-align:center; }
     .err { color:var(--danger); }
-    @media (max-width:560px){ main{padding:0}.panel{border-left:0;border-right:0;border-radius:0}.messages{max-height:calc(100svh - 210px)} header{padding:12px}.msg{max-width:92%} }
-    @media (prefers-color-scheme: dark){ :root{--bg:#0f131a;--surface:#161b24;--soft:#10151d;--line:#293241;--text:#edf2f7;--muted:#98a2b3;--accent:#3b82f6;} }
+    .composer { padding:12px 18px max(12px,env(safe-area-inset-bottom)); border-top:1px solid var(--line); background:rgba(255,255,255,.96); display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:9px; align-items:end; }
+    .composer.blocked { display:none; }
+    .composer.blocked textarea { background:#f8fafc; color:var(--muted); }
+    textarea { width:100%; min-height:48px; max-height:132px; resize:none; padding:12px 13px; border:1px solid var(--line); border-radius:14px; color:var(--text); background:#fff; font-size:16px; line-height:1.45; outline:none; }
+    textarea:focus { border-color:#93b4ff; box-shadow:0 0 0 3px rgba(37,99,235,.12); }
+    .send { min-width:72px; height:48px; border-radius:14px; color:#fff; background:var(--accent); font-weight:800; }
+    .files-btn { width:48px; height:48px; border-radius:14px; color:#1d4ed8; background:var(--accent-soft); font-weight:850; }
+    .drawer-backdrop { position:fixed; inset:0; background:rgba(15,23,42,.34); opacity:0; pointer-events:none; transition:.18s ease; z-index:30; }
+    .drawer { position:fixed; left:50%; bottom:0; width:min(720px,100%); min-height:min(300px,54svh); max-height:72svh; transform:translate(-50%,105%); border-radius:22px 22px 0 0; background:#fff; box-shadow:var(--shadow); transition:.22s ease; z-index:31; overflow:hidden; display:grid; grid-template-rows:auto minmax(0,1fr); }
+    .drawer.open { transform:translate(-50%,0); }
+    .drawer-backdrop.open { opacity:1; pointer-events:auto; }
+    .drawer-head { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+    .drawer-head strong { font-size:15px; }
+    .close { width:34px; height:34px; border-radius:10px; background:#f2f4f7; color:var(--muted); }
+    .files { padding:12px; display:flex; flex-direction:column; gap:8px; overflow:auto; max-height:calc(72svh - 64px); }
+    .files:empty::before { content:"桌面端或 DeskAgent 发送文件后，会显示在这里。请不要转发包含连接码和密钥的远程链接。"; color:var(--muted); font-size:14px; line-height:1.5; padding:10px 4px 18px; }
+    .file { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; padding:12px; border:1px solid var(--line); border-radius:12px; color:var(--text); text-decoration:none; background:#fff; }
+    .file span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:650; }
+    .file span:last-child { color:var(--muted); font-size:12px; }
+    .download-tag { padding:5px 8px; border-radius:999px; background:var(--accent-soft); color:#1d4ed8; font-weight:800; }
+    .sidebar-backdrop { display:none; position:fixed; inset:0; background:rgba(15,23,42,.36); z-index:19; }
+    @media (max-width:760px){
+      .shell{display:block;background:var(--bg)}
+      .sidebar{position:fixed; inset:0 auto 0 0; width:min(306px,82vw); transform:translateX(-104%); transition:.22s ease; z-index:20; box-shadow:var(--shadow)}
+      .sidebar.open{transform:translateX(0)}
+      .sidebar-backdrop.open{display:block}
+      .app{min-height:100svh}
+      header{height:58px;padding:0 12px}
+      .icon-btn{display:grid}
+      .chat{padding:14px 10px 12px}
+      .msg{max-width:88%;font-size:15px}
+      .composer{padding:9px 10px max(9px,env(safe-area-inset-bottom));grid-template-columns:minmax(0,1fr) 48px 58px}
+      .composer.blocked{grid-template-columns:minmax(0,1fr) 48px}
+      .composer.blocked .send{display:none}
+      .send{min-width:58px}
+      .empty{padding:22px 18px}
+      .empty h2{font-size:20px}
+    }
   </style>
 </head>
 <body>
-  <main>
-    <header><h1>智界助手</h1><span class="pill" id="state">连接中</span></header>
-    <section class="panel">
-      <div class="status" id="status">正在连接桌面端...</div>
-      <div class="messages" id="messages"></div>
-      <form id="form">
-        <textarea id="text" placeholder="输入要发送给电脑上的智界助手的任务..."></textarea>
-        <button id="send" type="submit">发送</button>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><span class="mark">智</span><span>智界助手</span></div>
+      <div class="session-card">
+        <p class="session-title">当前远程会话</p>
+        <p class="session-note" id="sessionNote">正在连接桌面端...</p>
+      </div>
+      <div class="side-list">
+        <div class="side-item">当前对话</div>
+      </div>
+      <p class="side-foot"><strong>安全提醒</strong><br />远程链接包含连接码和密钥，请不要转发。文件由桌面端或 DeskAgent 明确发送后才会出现在下载列表。</p>
+    </aside>
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+    <main class="app">
+      <header>
+        <button class="icon-btn" id="menuBtn" type="button" aria-label="打开对话记录">☰</button>
+        <h1>远程控制<span class="sub" id="status">正在连接桌面端...</span></h1>
+        <span class="pill" id="state">连接中</span>
+      </header>
+      <section class="chat" id="messages">
+        <div class="recovery hidden" id="recovery">
+          <strong>需要重新扫码</strong>
+          <p id="recoveryText">请在电脑端重新生成二维码并扫码。</p>
+          <div class="recovery-actions">
+            <button id="retryBtn" type="button">重新连接</button>
+            <button id="copyErrBtn" type="button">复制错误</button>
+            <a href="/" id="helpLink">查看安装说明</a>
+          </div>
+        </div>
+        <div class="empty" id="empty">
+          <h2>连接桌面端后开始对话</h2>
+          <p>输入任务后，电脑上的 DeskAgent 会处理请求。电脑端发送的文件会在右下角下载列表中出现。</p>
+        </div>
+      </section>
+      <form class="composer" id="form">
+        <textarea id="text" rows="1" placeholder="输入任务，例如：帮我整理桌面并把结果发到手机"></textarea>
+        <button class="files-btn" id="filesBtn" type="button" aria-label="查看下载文件" title="查看下载文件">↓</button>
+        <button class="send" id="send" type="submit">发送</button>
       </form>
-    </section>
-    <section class="panel"><div class="status">可下载文件</div><div class="files" id="files"></div></section>
-  </main>
+    </main>
+  </div>
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <section class="drawer" id="filesDrawer" aria-label="可下载文件">
+    <div class="drawer-head"><strong>可下载文件</strong><button class="close" id="closeFiles" type="button">×</button></div>
+    <div class="files" id="files"></div>
+  </section>
   <script>
     const initialCode = "__INITIAL_CODE__";
     const params = new URLSearchParams(location.search);
@@ -1365,8 +1452,24 @@ fn remote_page_html_modern(code: Option<&str>, api_base: &str) -> String {
     const apiBase = __API_BASE_JSON__;
     const stateEl = document.getElementById('state');
     const statusEl = document.getElementById('status');
+    const sessionNoteEl = document.getElementById('sessionNote');
     const messagesEl = document.getElementById('messages');
+    const emptyEl = document.getElementById('empty');
+    const emptyTitleEl = emptyEl ? emptyEl.querySelector('h2') : null;
+    const emptyTextEl = emptyEl ? emptyEl.querySelector('p') : null;
     const filesEl = document.getElementById('files');
+    const recoveryEl = document.getElementById('recovery');
+    const recoveryTitleEl = recoveryEl ? recoveryEl.querySelector('strong') : null;
+    const recoveryTextEl = document.getElementById('recoveryText');
+    const retryBtn = document.getElementById('retryBtn');
+    const copyErrBtn = document.getElementById('copyErrBtn');
+    const filesDrawer = document.getElementById('filesDrawer');
+    const drawerBackdrop = document.getElementById('drawerBackdrop');
+    const filesBtn = document.getElementById('filesBtn');
+    const closeFiles = document.getElementById('closeFiles');
+    const sidebar = document.getElementById('sidebar');
+    const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+    const menuBtn = document.getElementById('menuBtn');
     const form = document.getElementById('form');
     const textEl = document.getElementById('text');
     const sendEl = document.getElementById('send');
@@ -1374,18 +1477,34 @@ fn remote_page_html_modern(code: Option<&str>, api_base: &str) -> String {
     let machineId = '';
     let polling = null;
     let activeCommandId = '';
+    let lastError = '';
     const shownCommands = new Set();
-    function setState(text, error=false){ stateEl.textContent=text; statusEl.textContent=text; statusEl.classList.toggle('err', error); }
-    function add(text, cls='sys'){ const el=document.createElement('div'); el.className='msg '+cls; el.textContent=text; messagesEl.appendChild(el); messagesEl.scrollTop=messagesEl.scrollHeight; return el; }
+    function setState(text, error=false){ stateEl.textContent=text; stateEl.classList.toggle('err', error); stateEl.classList.toggle('ok', !error && /已连接|回复完成|已发送/.test(text)); statusEl.textContent=text; statusEl.classList.toggle('err', error); if(sessionNoteEl) sessionNoteEl.textContent=text; }
+    function add(text, cls='sys'){ if(emptyEl) emptyEl.remove(); const el=document.createElement('div'); el.className='msg '+cls; el.textContent=text; messagesEl.appendChild(el); messagesEl.scrollTop=messagesEl.scrollHeight; return el; }
+    function setComposerBlocked(blocked, reason){ form.classList.toggle('blocked', blocked); textEl.disabled=blocked; sendEl.disabled=blocked; filesBtn.disabled=blocked; if(blocked){ textEl.placeholder=reason||'连接失败，请回到电脑端重新扫码'; } else { textEl.placeholder='输入任务，例如：帮我整理桌面并把结果发到手机'; } }
+    function friendlyError(message){ const raw=String(message||''); if(/缺少连接码|缺少连接密钥|client key|missing/i.test(raw)) return '远程链接不完整'; if(/无效|过期|expired|invalid|404|410/i.test(raw)) return '二维码已过期或已失效'; return '暂时无法连接电脑'; }
+    function showRecovery(message){ const title=friendlyError(message); lastError=message||title; messagesEl.classList.add('has-recovery'); recoveryEl.classList.remove('hidden'); if(recoveryTitleEl) recoveryTitleEl.textContent=title; recoveryTextEl.textContent='请在电脑端左侧“远程连接”面板重新生成二维码并扫码。'; if(emptyTitleEl) emptyTitleEl.textContent='等待新的扫码连接'; if(emptyTextEl) emptyTextEl.textContent='重新扫码后显示电脑端回复和下载文件。'; }
+    function hideRecovery(){ recoveryEl.classList.add('hidden'); messagesEl.classList.remove('has-recovery'); if(emptyTitleEl) emptyTitleEl.textContent='连接桌面端后开始对话'; if(emptyTextEl) emptyTextEl.textContent='输入任务后，电脑上的 DeskAgent 会处理请求。电脑端发送的文件会在右下角下载列表中出现。'; }
     function size(n){ n=Number(n||0); if(n>=1073741824)return(n/1073741824).toFixed(1)+' GB'; if(n>=1048576)return(n/1048576).toFixed(1)+' MB'; if(n>=1024)return(n/1024).toFixed(1)+' KB'; return n+' B'; }
+    function toggleFiles(open){ filesDrawer.classList.toggle('open', open); drawerBackdrop.classList.toggle('open', open); }
+    function toggleSidebar(open){ sidebar.classList.toggle('open', open); sidebarBackdrop.classList.toggle('open', open); }
+    filesBtn.addEventListener('click', ()=>toggleFiles(true));
+    closeFiles.addEventListener('click', ()=>toggleFiles(false));
+    drawerBackdrop.addEventListener('click', ()=>toggleFiles(false));
+    menuBtn.addEventListener('click', ()=>toggleSidebar(true));
+    sidebarBackdrop.addEventListener('click', ()=>toggleSidebar(false));
+    retryBtn.addEventListener('click', ()=>{ hideRecovery(); setComposerBlocked(true,'正在重新连接...'); setState('正在重新连接...'); connect().then(()=>{ polling=setInterval(()=>{ refreshCommands().catch(()=>{}); refreshFiles().catch(()=>{}); },2500); if(polling.unref) polling.unref(); }).catch(err=>{ const friendly=friendlyError(err&&err.message); setState('需要重新扫码',true); showRecovery((err&&err.message)||friendly); setComposerBlocked(true,friendly); }); });
+    copyErrBtn.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(lastError||statusEl.textContent||'连接失败'); copyErrBtn.textContent='已复制'; setTimeout(()=>copyErrBtn.textContent='复制错误',1400); }catch(_){ copyErrBtn.textContent='复制失败'; setTimeout(()=>copyErrBtn.textContent='复制错误',1400); } });
+    textEl.addEventListener('input', ()=>{ textEl.style.height='auto'; textEl.style.height=Math.min(textEl.scrollHeight,132)+'px'; });
     async function api(path, options={}){ const res=await fetch(apiBase+path,{method:options.method||'GET',headers:{'Content-Type':'application/json'},body:options.body?JSON.stringify(options.body):undefined}); const data=await res.json().catch(()=>({})); if(!res.ok) throw new Error((data.error&&data.error.message)||'请求失败 ('+res.status+')'); return data; }
     function latestAssistant(result){ const events=(result&&result.events)||[]; for(let i=events.length-1;i>=0;i--){ if(events[i].type==='message'&&events[i].text) return events[i].text; } for(let i=events.length-1;i>=0;i--){ if(events[i].type==='delta'&&events[i].text) return events[i].text; } return ''; }
-    async function connect(){ if(!code) throw new Error('缺少连接码，请重新扫码'); if(!clientKey) throw new Error('缺少连接密钥，请重新扫码'); const info=await api('/api/remote/relay/pairings/'+encodeURIComponent(code),{method:'POST',body:{client_key:clientKey}}); sessionId=info.session_id; machineId=info.machine_id; stateEl.textContent='已连接'; statusEl.textContent='已连接到电脑 '+machineId.slice(0,12); add('已通过中心节点连接到桌面端。'); await refreshFiles(); textEl.focus(); }
+    async function connect(){ if(polling){ clearInterval(polling); polling=null; } sessionId=''; machineId=''; if(!code||!clientKey) throw new Error('远程链接不完整'); const info=await api('/api/remote/relay/pairings/'+encodeURIComponent(code),{method:'POST',body:{client_key:clientKey}}); sessionId=info.session_id; machineId=info.machine_id; hideRecovery(); setComposerBlocked(false); stateEl.textContent='已连接'; stateEl.classList.remove('err'); stateEl.classList.add('ok'); statusEl.textContent='已连接到电脑 '+machineId.slice(0,12); statusEl.classList.remove('err'); if(sessionNoteEl) sessionNoteEl.textContent='已连接到电脑 '+machineId.slice(0,12); add('已通过中心节点连接到桌面端。请不要转发当前链接；文件由电脑端发送后会出现在下载列表。'); await refreshFiles(); textEl.focus(); }
     async function sendMessage(text){ const created=await api('/api/remote/relay/sessions/'+encodeURIComponent(sessionId)+'/commands',{method:'POST',body:{command_type:'chat_message',payload:{text}}}); activeCommandId=created.command_id; return created.command_id; }
     async function refreshCommands(){ if(!sessionId) return; const data=await api('/api/remote/relay/sessions/'+encodeURIComponent(sessionId)+'/commands'); const command=(data.commands||[]).find(c=>c.id===activeCommandId); if(command){ if(command.status==='completed'){ const reply=latestAssistant(command.result)||'任务已完成。'; if(!shownCommands.has(command.id)){ shownCommands.add(command.id); add(reply,'ai'); activeCommandId=''; await refreshFiles(); setState('回复完成'); } } else if(command.status==='failed'){ if(!shownCommands.has(command.id)){ shownCommands.add(command.id); add(command.error||'远程任务失败','sys err'); } activeCommandId=''; setState('任务失败',true); } else { stateEl.textContent='处理中'; statusEl.textContent='桌面端正在处理任务...'; } } }
-    async function refreshFiles(){ if(!sessionId) return; const data=await api('/api/remote/relay/sessions/'+encodeURIComponent(sessionId)+'/files'); filesEl.textContent=''; for(const file of data.files||[]){ const a=document.createElement('a'); a.className='file'; a.href=file.download_url; a.target='_blank'; a.rel='noreferrer'; a.download=file.name||''; const n=document.createElement('span'); n.textContent=file.name||'download'; const m=document.createElement('span'); m.textContent=(file.large_file?'局域网 ':'')+size(file.size); a.append(n,m); filesEl.appendChild(a); } }
+    async function refreshFiles(){ if(!sessionId) return; const data=await api('/api/remote/relay/sessions/'+encodeURIComponent(sessionId)+'/files'); filesEl.textContent=''; for(const file of data.files||[]){ const a=document.createElement('a'); a.className='file'; a.href=file.download_url; a.target='_blank'; a.rel='noreferrer'; a.download=file.name||''; const n=document.createElement('span'); n.textContent=file.name||'download'; const m=document.createElement('span'); m.innerHTML='<strong class="download-tag">下载</strong> '+(file.large_file?'局域网 ':'')+size(file.size); a.append(n,m); filesEl.appendChild(a); } }
     form.addEventListener('submit', async (e)=>{ e.preventDefault(); const text=textEl.value.trim(); if(!text||!sessionId) return; sendEl.disabled=true; add(text,'me'); textEl.value=''; try{ await sendMessage(text); setState('已发送，等待桌面端回复'); }catch(err){ add(err.message||'发送失败','sys err'); setState('发送失败',true); activeCommandId=''; } finally{ sendEl.disabled=false; } });
-    connect().then(()=>{ polling=setInterval(()=>{ refreshCommands().catch(()=>{}); refreshFiles().catch(()=>{}); },2500); if(polling.unref) polling.unref(); }).catch(err=>{ setState(err.message||'连接失败',true); sendEl.disabled=true; });
+    setComposerBlocked(true,'正在连接桌面端...');
+    connect().then(()=>{ polling=setInterval(()=>{ refreshCommands().catch(()=>{}); refreshFiles().catch(()=>{}); },2500); if(polling.unref) polling.unref(); }).catch(err=>{ const friendly=friendlyError(err&&err.message); setState('需要重新扫码',true); showRecovery((err&&err.message)||friendly); setComposerBlocked(true,friendly); });
   </script>
 </body>
 </html>"###.replace("__INITIAL_CODE__", &initial_code).replace("__API_BASE_JSON__", &api_base_json)

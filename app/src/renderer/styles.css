@@ -575,6 +575,14 @@ button {
   white-space: nowrap;
 }
 
+.model-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .model-select {
   width: min(260px, 100%);
   min-height: 30px;
@@ -589,6 +597,16 @@ button {
 .model-select:disabled {
   color: var(--muted);
   opacity: 0.72;
+}
+
+.model-cost-hint {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .theme-switcher {

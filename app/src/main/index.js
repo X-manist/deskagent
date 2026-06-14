@@ -18,6 +18,10 @@ const {
 
 loadEnvFiles(defaultEnvCandidates(path.resolve(__dirname, '..', '..')));
 
+if (process.env.DESKAGENT_USER_DATA_DIR) {
+  app.setPath('userData', path.resolve(process.env.DESKAGENT_USER_DATA_DIR));
+}
+
 const DEFAULT_CLOUD_BACKEND_URL = 'http://admin-deskagent.debinxiang.top/';
 
 // The metering/auth backend (deskagent-server). The desktop never holds the real

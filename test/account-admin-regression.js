@@ -87,5 +87,14 @@ assert(mainSource.includes('remote:shareFiles'), 'main process registers remote 
 assert(rendererSource.includes('startAccountBadgePolling'), 'account badge refreshes on an interval');
 assert(rendererSource.includes("window.api.on('chat:turnDone'"), 'account badge refreshes after a completed turn');
 assert(rendererSource.includes('scheduleRemoteAutoRefresh'), 'remote pairing is scheduled for automatic refresh');
+assert(rendererHtml.includes('modelCostHint'), 'desktop model selector exposes visible point cost hint');
+assert(rendererSource.includes('约 ${multiplier.toFixed(2)} 积分/百万 token'), 'desktop model selector renders point multiplier hint');
+assert(rendererSource.includes('约 ${days} 天'), 'desktop remote countdown supports multi-day relay links');
+
+const remoteRoutes = read('server/src/routes/remote.rs');
+assert(remoteRoutes.includes('远程链接不完整'), 'mobile remote page maps missing code/key to a friendly error');
+assert(remoteRoutes.includes('二维码已过期或已失效'), 'mobile remote page maps expired relay links to a friendly error');
+assert(remoteRoutes.includes('.composer.blocked { display:none; }'), 'mobile remote page hides composer when reconnect is required');
+assert(remoteRoutes.includes('请在电脑端左侧“远程连接”面板重新生成二维码并扫码'), 'mobile remote recovery tells users where to rescan');
 
 console.log('account/admin regression assertions passed');

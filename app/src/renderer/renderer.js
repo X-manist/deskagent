@@ -7,6 +7,7 @@ const stopBtn = $('#stopBtn');
 const statusDot = $('#statusDot');
 const statusText = $('#statusText');
 const modelTag = $('#modelTag');
+const modelCostHint = $('#modelCostHint');
 const sessionsEl = $('#sessions');
 const newSessionBtn = $('#newSessionBtn');
 const attachmentsEl = $('#attachments');
@@ -80,12 +81,30 @@ function setModelTag(settings) {
   currentModel = settings && settings.model ? settings.model : currentModel;
   if (settings && Array.isArray(settings.availableModels)) availableModels = settings.availableModels;
   renderModelSelect();
-  if (settingsModel) settingsModel.textContent = currentModel || '登录后自动获取';
+  if (settingsModel) settingsModel.textContent = currentModel ? modelDisplayNameById(currentModel) : '登录后自动获取';
 }
 
 function modelDisplayName(model) {
   if (!model) return '';
   return model.display_name || model.name || model.id || '';
+}
+
+function modelDisplayNameById(id) {
+  const found = availableModels.find((model) => model.id === id);
+  return found ? modelDisplayName(found) : id;
+}
+
+function modelListDisplay(models) {
+  const list = Array.isArray(models) ? models.filter(Boolean) : [];
+  return list.length ? list.map(modelDisplayNameById).join(', ') : '';
+}
+
+function updateModelCostHint(model) {
+  if (!modelCostHint) return;
+  const multiplier = Number(model && model.point_multiplier);
+  modelCostHint.textContent = Number.isFinite(multiplier) && multiplier > 0
+    ? `约 ${multiplier.toFixed(2)} 积分/百万 token`
+    : '';
 }
 
 function renderModelSelect() {
@@ -100,6 +119,7 @@ function renderModelSelect() {
     opt.textContent = '登录后自动获取模型';
     modelTag.appendChild(opt);
     modelTag.disabled = true;
+    updateModelCostHint(null);
     return;
   }
   options.forEach((model) => {
@@ -114,6 +134,7 @@ function renderModelSelect() {
   modelTag.value = nextValue;
   modelTag.disabled = options.length <= 1;
   if (nextValue !== currentModel) currentModel = nextValue;
+  updateModelCostHint(options.find((model) => model.id === nextValue));
 }
 
 function renderSettingsSummary() {
@@ -591,7 +612,11 @@ function formatRemoteRemaining(value) {
   const minutes = Math.ceil(ms / 60000);
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
-  if (hours >= 24) return '约 1 天';
+  const days = Math.floor(hours / 24);
+  if (days > 0) {
+    const remHours = hours % 24;
+    return remHours > 0 ? `约 ${days} 天 ${remHours} 小时` : `约 ${days} 天`;
+  }
   if (hours > 0) return `约 ${hours} 小时 ${mins} 分钟`;
   return `约 ${minutes} 分钟`;
 }
@@ -879,11 +904,11 @@ if (modelTag) {
     if (!next || next === currentModel) return;
     const prev = currentModel;
     currentModel = next;
-    if (settingsModel) settingsModel.textContent = next;
+      if (settingsModel) settingsModel.textContent = modelDisplayNameById(next);
     try {
       const result = await window.api.setModel(next);
       if (result && result.settings) setModelTag(result.settings);
-      showSystemNotice(`已切换模型：${next}`);
+      showSystemNotice(`已切换模型：${modelDisplayNameById(next)}`);
     } catch (e) {
       currentModel = prev;
       renderModelSelect();
@@ -1487,7 +1512,7 @@ async function renderAccountPanel() {
         const remaining = Math.round(Number(e.points_remaining || e.tokens_remaining || 0));
         const total = Math.round(Number(e.points || e.token_allowance || 0));
         const pct = total ? Math.max(0, Math.min(100, (remaining / total) * 100)) : 0;
-        const models = Array.isArray(e.models) && e.models.length ? e.models.join(', ') : e.model;
+        const models = modelListDisplay(e.models) || modelDisplayNameById(e.model);
         html += `<div style="margin-top:8px">${t('套餐', 'Plan')} (${escapeHtml(models)}): ${t('剩余', 'remaining')} ${remaining.toLocaleString()} / ${total.toLocaleString()} ${t('积分', 'points')} (${t('至', 'until')} ${escapeHtml(e.expires_at)})`;
         html += `<div class="quota-bar"><span style="width:${pct}%"></span></div></div>`;
       });
@@ -1502,7 +1527,7 @@ async function renderAccountPanel() {
       (packages || []).forEach((p) => {
         const row = document.createElement('div');
         row.className = 'pkg';
-        const models = Array.isArray(p.models) && p.models.length ? p.models.join(', ') : p.model;
+        const models = modelListDisplay(p.models) || modelDisplayNameById(p.model);
         const points = Number(p.points || p.total_tokens || 0);
         row.innerHTML = `<div><div class="pkg-name">${escapeHtml(packageDisplayName(p))}</div>` +
           `<div class="pkg-meta">${escapeHtml(models)} · ${points.toLocaleString()} ${t('积分', 'points')} · ${p.duration_days} ${t('天', 'days')}</div></div>` +
